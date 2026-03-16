@@ -100,22 +100,24 @@ WATCHLIST = {
 }
 
 # ─────────────────────────────────────────────
-# RSS FEEDS
+# RSS FEEDS  (url, language)
+# lang "zh" → implication output in Chinese only
+# lang "en" → implication output in English + Chinese translation
 # ─────────────────────────────────────────────
 RSS_FEEDS = [
     # English – Tech / Business
-    "https://feeds.reuters.com/reuters/technologyNews",
-    "https://feeds.reuters.com/reuters/businessNews",
-    "https://feeds.reuters.com/reuters/companyNews",
-    "https://www.wsj.com/xml/rss/3_7085.xml",           # WSJ Tech
-    "https://www.wsj.com/xml/rss/3_7014.xml",           # WSJ Markets
-    "https://feeds.finance.yahoo.com/rss/2.0/headline?s=NVDA,TSM,INTC,AVGO,AMD,MU,MRVL,QCOM",
+    ("https://feeds.reuters.com/reuters/technologyNews",  "en"),   # Reuters Tech
+    ("https://feeds.reuters.com/reuters/businessNews",    "en"),   # Reuters Business
+    ("https://feeds.reuters.com/reuters/companyNews",     "en"),   # Reuters Company
+    ("https://www.wsj.com/xml/rss/3_7085.xml",           "en"),   # WSJ Tech
+    ("https://www.wsj.com/xml/rss/3_7014.xml",           "en"),   # WSJ Markets
+    ("https://feeds.finance.yahoo.com/rss/2.0/headline?s=NVDA,TSM,INTC,AVGO,AMD,MU,MRVL,QCOM", "en"),
     # Traditional Chinese – TW
-    "https://www.chinatimes.com/rss/industry.xml",      # 工商時報 – 產業
-    "https://www.chinatimes.com/rss/tech.xml",          # 工商時報 – 科技
-    "https://www.cnyes.com/rss/cat/tw_stock_news",      # 鉅亨網 – 台股
-    "https://money.udn.com/rssfeed/news/1001/5588",     # 經濟日報 – 科技
-    "https://money.udn.com/rssfeed/news/1001/5612",     # 經濟日報 – 產業
+    ("https://www.chinatimes.com/rss/industry.xml",      "zh"),   # 工商時報 – 產業
+    ("https://www.chinatimes.com/rss/tech.xml",          "zh"),   # 工商時報 – 科技
+    ("https://www.cnyes.com/rss/cat/tw_stock_news",      "zh"),   # 鉅亨網 – 台股
+    ("https://money.udn.com/rssfeed/news/1001/5588",     "zh"),   # 經濟日報 – 科技
+    ("https://money.udn.com/rssfeed/news/1001/5612",     "zh"),   # 經濟日報 – 產業
 ]
 
 
@@ -139,7 +141,7 @@ def parse_pub_date(entry) -> datetime | None:
 def fetch_rss(hours: int) -> list[dict]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     articles = []
-    for url in RSS_FEEDS:
+    for url, lang in RSS_FEEDS:
         try:
             feed = feedparser.parse(url, request_headers={"User-Agent": "NewsScreener/1.0"})
             for entry in feed.entries:
@@ -156,6 +158,7 @@ def fetch_rss(hours: int) -> list[dict]:
                         "link": link,
                         "source": feed.feed.get("title", url),
                         "published": pub.strftime("%Y-%m-%d %H:%M UTC") if pub else "unknown",
+                        "lang": lang,
                     })
         except Exception as e:
             print(f"  [RSS warn] {url}: {e}", file=sys.stderr)
@@ -193,6 +196,7 @@ def fetch_newsapi(hours: int, api_key: str) -> list[dict]:
                 "link":      a.get("url", ""),
                 "source":    a.get("source", {}).get("name", "NewsAPI"),
                 "published": a.get("publishedAt", "unknown"),
+                "lang":      "en",   # NewsAPI only returns English results
             })
     except Exception as e:
         print(f"  [NewsAPI warn] {e}", file=sys.stderr)
@@ -215,23 +219,30 @@ def match_stocks(articles: list[dict]) -> dict[str, list[dict]]:
 
 
 def score_with_claude(matched: dict[str, list[dict]], client: Anthropic) -> dict[str, list[dict]]:
-    """Add an 'implication' field to each article using Claude."""
+    """Add an 'implication' field to each article using Claude.
+
+    Language rules:
+    - Chinese source (lang="zh")  → implication written in Chinese only
+    - English source  (lang="en") → implication written in English,
+                                     followed by a Chinese translation in parentheses
+    """
+    import json as _json
+
     all_articles = []
     for articles in matched.values():
         all_articles.extend(articles)
-    # Deduplicate
-    seen = set()
-    unique = []
+
+    # Deduplicate by title
+    seen: set[str] = set()
+    unique: list[dict] = []
     for a in all_articles:
-        key = a["title"]
-        if key not in seen:
-            seen.add(key)
+        if a["title"] not in seen:
+            seen.add(a["title"])
             unique.append(a)
 
     if not unique:
         return matched
 
-    # Batch into groups of 20 to keep prompts manageable
     def chunks(lst, n):
         for i in range(0, len(lst), n):
             yield lst[i:i + n]
@@ -240,15 +251,22 @@ def score_with_claude(matched: dict[str, list[dict]], client: Anthropic) -> dict
 
     for batch in chunks(unique, 20):
         items = "\n".join(
-            f"{i+1}. [{a['source']}] {a['title']}"
+            f"{i+1}. [lang={a.get('lang','en')}] [{a['source']}] {a['title']}"
             for i, a in enumerate(batch)
         )
         prompt = (
-            "You are an equity research assistant specializing in semiconductors and hardware.\n"
-            "For each news headline below, write ONE concise sentence (max 20 words) describing "
-            "the potential implication for the company's stock price or fundamentals "
-            "(e.g. earnings, demand, margins, market share, supply chain). "
-            "If a headline is unlikely to move fundamentals, reply 'No significant implication'.\n\n"
+            "You are an equity research assistant specializing in semiconductors and hardware.\n\n"
+            "For each headline below, write ONE concise sentence (≤20 words) on the potential "
+            "implication for the company's stock price or fundamentals "
+            "(e.g. earnings, demand, margins, market share, supply chain).\n\n"
+            "**Language rules** (follow strictly):\n"
+            "- If the headline is tagged [lang=zh]: write the implication in Traditional Chinese only.\n"
+            "- If the headline is tagged [lang=en]: write the implication in English, "
+            "then add a Chinese translation in parentheses. "
+            "Example: \"Strong data center demand drives upside. "
+            "（資料中心需求強勁，有望帶動業績超預期。）\"\n"
+            "- If a headline is unlikely to move fundamentals: reply \"No significant implication. "
+            "（對基本面影響不大。）\" for English, or \"對基本面影響不大。\" for Chinese.\n\n"
             "Headlines:\n" + items + "\n\n"
             "Reply in this exact JSON format:\n"
             '{"1": "implication text", "2": "implication text", ...}'
@@ -256,19 +274,18 @@ def score_with_claude(matched: dict[str, list[dict]], client: Anthropic) -> dict
         try:
             response = client.messages.create(
                 model="claude-opus-4-6",
-                max_tokens=1024,
+                max_tokens=1500,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = response.content[0].text.strip()
-            # Extract JSON even if wrapped in markdown
             if "```" in raw:
                 raw = raw.split("```")[1].lstrip("json").strip()
-            parsed = __import__("json").loads(raw)
+            parsed = _json.loads(raw)
             for i, article in enumerate(batch):
                 implications[article["title"]] = parsed.get(str(i + 1), "")
         except Exception as e:
             print(f"  [Claude warn] {e}", file=sys.stderr)
-        time.sleep(0.5)   # be polite to the API
+        time.sleep(0.5)
 
     # Write implications back
     for company, articles in matched.items():

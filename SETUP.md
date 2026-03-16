@@ -61,19 +61,32 @@ python news_screener.py --no-ai
 
 ---
 
-## 自動排程（可選）：每天 8:00 自動執行並寄 Email
+## 自動排程：每天 8:00 自動執行（智慧模式）
+
+腳本 `run_daily.sh` 會自動判斷星期幾：
+- **週一** → 抓過去 **72 小時**（補掃週五早上 8 點到週一早上 8 點）
+- **週二～週五** → 抓過去 **24 小時**
 
 ### macOS / Linux (cron)
 
 ```bash
+# 1. 給腳本執行權限
+chmod +x run_daily.sh
+
+# 2. 開啟 crontab 編輯器
 crontab -e
-# 加入這行（每天 8:00 執行，結果存成當天日期的檔案）：
-0 8 * * * cd /path/to/this/folder && python news_screener.py --out brief_$(date +\%Y\%m\%d).md
+
+# 3. 加入這行（把路徑換成你實際的資料夾路徑）
+0 8 * * 1-5 /Users/yourname/news_screener/run_daily.sh
 ```
 
-### 用 Gmail 自動寄信（進階）
-可以加裝 `yagmail` 套件，在腳本末尾加幾行即可把報告寄到你的信箱。
-若有需要，告訴 Claude Code 幫你加上去。
+報告會自動存到 `briefs/brief_YYYY-MM-DD.md`。
+
+### Windows (工作排程器)
+
+1. 搜尋「工作排程器」→「建立基本工作」
+2. 觸發程序：每天 08:00，重複週一到週五
+3. 動作：執行 `python`，引數 `news_screener.py --hours 24 --out briefs/brief_%date%.md`
 
 ---
 
