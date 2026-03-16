@@ -902,7 +902,7 @@ def generate_pdf(matched, prices, hours, output_path):
             pdf.set_font(font, size=10)
             pdf.set_text_color(20, 20, 20)
             pdf.multi_cell(W, 6, f"  {idx}. {article['title']}",
-                           new_x="LMARGIN", new_y="NEXT")
+                           align="L", new_x="LMARGIN", new_y="NEXT")
 
             # News content — Claude summary (preferred) or raw content
             content = (article.get("claude_summary") or "").strip()
@@ -920,7 +920,7 @@ def generate_pdf(matched, prices, hours, output_path):
                 if len(content) > 1500:
                     content = content[:1500] + "…"
                 pdf.multi_cell(W, 5, f"    {content}",
-                               new_x="LMARGIN", new_y="NEXT")
+                               align="L", new_x="LMARGIN", new_y="NEXT")
 
             # Source · time (clean line — no raw URL)
             reset()
