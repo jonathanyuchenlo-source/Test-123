@@ -3,7 +3,6 @@ import argparse, os, sys, time, json
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import feedparser, requests
-from anthropic import Anthropic
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -193,31 +192,46 @@ def fetch_rss(hours):
     return articles
 
 
-def fetch_bloomberg(hours, api_key):
-    """Fetch Bloomberg headlines via NewsAPI (bloomberg source only)."""
+def fetch_newsapi(hours, api_key):
+    """Two-pass NewsAPI fetch: Bloomberg/WSJ by source + broad semiconductor keyword query."""
     if not api_key:
         return []
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    try:
-        resp = requests.get("https://newsapi.org/v2/everything", timeout=15, params={
-            "sources":   "bloomberg",
-            "from":      cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "sortBy":    "publishedAt",
-            "pageSize":  100,
-            "apiKey":    api_key,
-        })
-        resp.raise_for_status()
-        return [{
-            "title":     a.get("title", "").strip(),
-            "summary":   (a.get("description") or "")[:400],
-            "link":      a.get("url", ""),
-            "source":    "Bloomberg",
-            "published": a.get("publishedAt", "unknown"),
-            "lang":      "en",
-        } for a in resp.json().get("articles", [])]
-    except Exception as e:
-        print(f"  [Bloomberg/NewsAPI warn] {e}", file=sys.stderr)
-        return []
+    base = {
+        "from": cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "sortBy": "publishedAt", "pageSize": 100,
+        "apiKey": api_key, "language": "en",
+    }
+    queries = [
+        {"sources": "bloomberg,the-wall-street-journal"},
+        {"q": (
+            "TSMC OR NVIDIA OR Intel OR Broadcom OR AMD OR Micron OR Qualcomm OR Marvell "
+            "OR Foxconn OR MediaTek OR \"AI chip\" OR HBM OR CoWoS OR semiconductor "
+            "OR Astera OR Credo OR Wiwynn OR \"Super Micro\" OR \"supply chain\""
+        )},
+    ]
+    results, seen = [], set()
+    for extra in queries:
+        try:
+            resp = requests.get("https://newsapi.org/v2/everything", timeout=15,
+                                params={**base, **extra})
+            resp.raise_for_status()
+            for a in resp.json().get("articles", []):
+                title = (a.get("title") or "").strip()
+                if not title or title in seen:
+                    continue
+                seen.add(title)
+                results.append({
+                    "title":     title,
+                    "summary":   (a.get("description") or "")[:400],
+                    "link":      a.get("url", ""),
+                    "source":    a.get("source", {}).get("name", "NewsAPI"),
+                    "published": a.get("publishedAt", "unknown"),
+                    "lang":      "en",
+                })
+        except Exception as e:
+            print(f"  [NewsAPI warn] {e}", file=sys.stderr)
+    return results
 
 
 def fetch_futubull(hours):
@@ -477,15 +491,7 @@ def generate_pdf(matched, prices, hours, output_path):
             pdf.multi_cell(W, 6, f"  {idx}. {article['title']}",
                            new_x="LMARGIN", new_y="NEXT")
 
-            # AI implication
-            if article.get("implication"):
-                reset()
-                pdf.set_font(font, size=9)
-                pdf.set_text_color(30, 80, 180)
-                pdf.multi_cell(W, 5, f"    \u2192 {article['implication']}",
-                               new_x="LMARGIN", new_y="NEXT")
-
-            # Summary / content
+            # News content / summary
             if article.get("summary"):
                 reset()
                 pdf.set_font(font, size=8)
@@ -496,12 +502,13 @@ def generate_pdf(matched, prices, hours, output_path):
                 pdf.multi_cell(W, 5, f"    {snippet}",
                                new_x="LMARGIN", new_y="NEXT")
 
-            # Source · time
+            # Source · time · link
             reset()
             pdf.set_font(font, size=7)
-            pdf.set_text_color(160, 160, 160)
-            src_line = f"    {article['source']}  ·  {article['published']}"
-            pdf.cell(W, 4, src_line, new_x="LMARGIN", new_y="NEXT")
+            pdf.set_text_color(100, 100, 200)
+            link = article.get("link", "")
+            src_line = f"    {article['source']}  ·  {article['published']}  ·  {link}"
+            pdf.multi_cell(W, 4, src_line, new_x="LMARGIN", new_y="NEXT")
             pdf.ln(2)
 
         pdf.ln(4)
@@ -517,35 +524,26 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--hours",  type=int, default=24)
     parser.add_argument("--out",    type=str, default=None)
-    parser.add_argument("--no-ai",  action="store_true")
     parser.add_argument("--no-pdf", action="store_true", help="Output Markdown instead of PDF")
     args = parser.parse_args()
-
-    use_ai = not args.no_ai and bool(os.getenv("ANTHROPIC_API_KEY", ""))
 
     print(f"[1/6] 抓取 RSS：Reuters / WSJ / 經濟日報 / 鉅亨網（過去 {args.hours} 小時）…", file=sys.stderr)
     rss = fetch_rss(args.hours)
     print(f"      {len(rss)} 則", file=sys.stderr)
 
-    print("[2/6] 抓取 Bloomberg（via NewsAPI）…", file=sys.stderr)
-    bloomberg = fetch_bloomberg(args.hours, os.getenv("NEWSAPI_KEY", ""))
-    print(f"      {len(bloomberg)} 則", file=sys.stderr)
+    print("[2/6] Bloomberg + NewsAPI broad query…", file=sys.stderr)
+    newsapi = fetch_newsapi(args.hours, os.getenv("NEWSAPI_KEY", ""))
+    print(f"      {len(newsapi)} 則", file=sys.stderr)
 
     print("[3/6] 抓取 Futubull…", file=sys.stderr)
     futu = fetch_futubull(args.hours)
     print(f"      {len(futu)} 則", file=sys.stderr)
 
     print("[4/6] 比對追蹤名單…", file=sys.stderr)
-    matched = match_stocks(rss + bloomberg + futu)
+    matched = match_stocks(rss + newsapi + futu)
     print(f"      共 {len(matched)} 家公司命中", file=sys.stderr)
 
-    if use_ai and matched:
-        print("[5/6] Claude 評注中…", file=sys.stderr)
-        matched = score_with_claude(matched, Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY")))
-    else:
-        print("[5/6] 略過 AI 評注", file=sys.stderr)
-
-    print("[6/6] 抓取股價…", file=sys.stderr)
+    print("[5/6] 抓取股價…", file=sys.stderr)
     prices = fetch_prices(list(matched.keys()))
     print(f"      取得 {len(prices)} 檔股價", file=sys.stderr)
 
@@ -576,8 +574,6 @@ def main():
                 for a in articles:
                     lines.append(f"- **[{a['source']}]** [{a['title']}]({a['link']})")
                     lines.append(f"  *{a['published']}*")
-                    if use_ai and a.get("implication"):
-                        lines.append(f"  > {a['implication']}")
                     if a.get("summary"):
                         lines.append(f"  {a['summary'].replace(chr(10), ' ')[:300]}…")
                     lines.append("")
