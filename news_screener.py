@@ -566,6 +566,69 @@ def filter_with_claude(matched, api_key):
 
 
 # ─────────────────────────────────────────────
+# ARTICLE BODY ENRICHMENT
+# ─────────────────────────────────────────────
+def _fetch_article_body(url, timeout=10):
+    """Follow redirects (Google News → real URL) and extract <p> text."""
+    try:
+        resp = requests.get(url, timeout=timeout, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        }, allow_redirects=True)
+        if resp.status_code != 200:
+            return "", url
+
+        real_url = resp.url   # final URL after redirects
+
+        from html.parser import HTMLParser
+        class _PExtractor(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.in_p = False
+                self.parts = []
+            def handle_starttag(self, tag, attrs):
+                if tag == 'p':
+                    self.in_p = True
+            def handle_endtag(self, tag):
+                if tag == 'p':
+                    self.in_p = False
+            def handle_data(self, data):
+                if self.in_p and data.strip():
+                    self.parts.append(data.strip())
+
+        ext = _PExtractor()
+        ext.feed(resp.text[:100000])
+        body = strip_html(' '.join(ext.parts))
+        return body[:3000], real_url
+    except Exception:
+        return "", url
+
+
+def enrich_articles(matched):
+    """For articles with short/missing content, fetch full article body from
+    the source URL. Also resolves Google News redirect URLs to real article
+    URLs for cleaner display. Only enriches articles that survived filtering
+    (typically 20-50), NOT the full raw feed."""
+    count = 0
+    for articles in matched.values():
+        for article in articles:
+            summary  = article.get("summary", "")
+            title    = article.get("title", "")
+            # Enrich if summary is empty, very short, or just a repeat of the title
+            needs_enrich = (
+                len(summary) < 100
+                or summary.strip().startswith(title.strip()[:20])
+            )
+            if needs_enrich and article.get("link"):
+                body, real_url = _fetch_article_body(article["link"])
+                if body and len(body) > len(summary):
+                    article["summary"] = body[:2000]
+                if real_url != article["link"]:
+                    article["link"] = real_url    # replace Google redirect
+                count += 1
+    return matched, count
+
+
+# ─────────────────────────────────────────────
 # AI SUMMARIZATION
 # ─────────────────────────────────────────────
 def summarize_with_claude(matched, api_key):
@@ -833,29 +896,40 @@ def generate_pdf(matched, prices, hours, output_path):
             pdf.multi_cell(W, 6, f"  {idx}. {article['title']}",
                            new_x="LMARGIN", new_y="NEXT")
 
-            # News content / summary
-            if article.get("summary"):
+            # News content — Claude summary (preferred) or raw content
+            content = (article.get("claude_summary") or "").strip()
+            if not content:
+                content = (article.get("summary") or "").strip()
+            # Skip if content just repeats the title
+            if content and not content.startswith(article["title"][:20]):
                 reset()
                 pdf.set_font(font, size=8)
-                pdf.set_text_color(80, 80, 80)
-                # Prefer Claude-generated summary; fall back to raw content
-                raw_text = article.get("claude_summary") or article.get("summary", "")
-                snippet  = raw_text.replace("\n", " ").strip()
-                if len(snippet) > 1500:
-                    snippet = snippet[:1500] + "…"
-                pdf.multi_cell(W, 5, f"    {snippet}",
+                pdf.set_text_color(60, 60, 60)
+                content = content.replace("\n", " ")
+                if len(content) > 1500:
+                    content = content[:1500] + "…"
+                pdf.multi_cell(W, 5, f"    {content}",
                                new_x="LMARGIN", new_y="NEXT")
 
-            # Source · time · link
+            # Source · time (clean line — no raw URL)
             reset()
             pdf.set_font(font, size=7)
-            pdf.set_text_color(100, 100, 200)
+            pdf.set_text_color(130, 130, 130)
+            # Show clean domain instead of full Google News redirect URL
             link = article.get("link", "")
-            src_line = f"    {article['source']}  ·  {article['published']}  ·  {link}"
-            pdf.multi_cell(W, 4, src_line, new_x="LMARGIN", new_y="NEXT")
-            pdf.ln(2)
+            try:
+                from urllib.parse import urlparse
+                domain = urlparse(link).netloc or ""
+            except Exception:
+                domain = ""
+            src_parts = [article['source'], article['published']]
+            if domain:
+                src_parts.append(domain)
+            pdf.cell(W, 4, "    " + "  ·  ".join(src_parts),
+                     new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(1)
 
-        pdf.ln(4)
+        pdf.ln(3)
 
     pdf.output(output_path)
     return output_path
@@ -871,44 +945,49 @@ def main():
     parser.add_argument("--no-pdf", action="store_true", help="Output Markdown instead of PDF")
     args = parser.parse_args()
 
-    print(f"[1/10] 抓取 RSS：WSJ（過去 {args.hours} 小時）…", file=sys.stderr)
+    print(f"[1/11] 抓取 RSS：WSJ（過去 {args.hours} 小時）…", file=sys.stderr)
     rss = fetch_rss(args.hours)
     print(f"       {len(rss)} 則", file=sys.stderr)
 
-    print("[2/10] 抓取 Reuters（via Google News RSS）…", file=sys.stderr)
+    print("[2/11] 抓取 Reuters（via Google News RSS）…", file=sys.stderr)
     reuters = fetch_google_news_reuters(args.hours)
     print(f"       {len(reuters)} 則", file=sys.stderr)
 
-    print("[3/10] 抓取工商時報 / 經濟日報（via Google News RSS）…", file=sys.stderr)
+    print("[3/11] 抓取工商時報 / 經濟日報（via Google News RSS）…", file=sys.stderr)
     tw_news = fetch_google_news_tw(args.hours)
     print(f"       {len(tw_news)} 則", file=sys.stderr)
 
-    print("[4/10] 抓取鉅亨網（台股 / 頭條 / 科技 / 美股）完整內文…", file=sys.stderr)
+    print("[4/11] 抓取鉅亨網（台股 / 頭條 / 科技 / 美股）完整內文…", file=sys.stderr)
     cnyes = fetch_cnyes_api(args.hours)
     print(f"       {len(cnyes)} 則", file=sys.stderr)
 
-    print("[5/10] Bloomberg + NewsAPI broad query…", file=sys.stderr)
+    print("[5/11] Bloomberg + NewsAPI broad query…", file=sys.stderr)
     newsapi = fetch_newsapi(args.hours, os.getenv("NEWSAPI_KEY", ""))
     print(f"       {len(newsapi)} 則", file=sys.stderr)
 
-    print("[6/10] 抓取 Futubull…", file=sys.stderr)
+    print("[6/11] 抓取 Futubull…", file=sys.stderr)
     futu = fetch_futubull(args.hours)
     print(f"       {len(futu)} 則", file=sys.stderr)
 
-    print("[7/10] 比對追蹤名單（過濾垃圾速報）…", file=sys.stderr)
+    print("[7/11] 比對追蹤名單（過濾垃圾速報）…", file=sys.stderr)
     matched = match_stocks(rss + reuters + tw_news + cnyes + newsapi + futu)
     print(f"       共 {len(matched)} 家公司命中（篩選前）", file=sys.stderr)
 
-    print("[8/10] Claude AI 篩選不相關新聞…", file=sys.stderr)
+    print("[8/11] Claude AI 篩選不相關新聞…", file=sys.stderr)
     matched = filter_with_claude(matched, os.getenv("ANTHROPIC_API_KEY", ""))
-    print(f"       篩選後 {len(matched)} 家公司，{sum(len(v) for v in matched.values())} 則", file=sys.stderr)
+    n_articles = sum(len(v) for v in matched.values())
+    print(f"       篩選後 {len(matched)} 家公司，{n_articles} 則", file=sys.stderr)
 
-    print("[9/10] Claude 摘要（繁體中文，200-300字）…", file=sys.stderr)
+    print(f"[9/11] 抓取文章全文（{n_articles} 篇）…", file=sys.stderr)
+    matched, n_enriched = enrich_articles(matched)
+    print(f"       成功抓取 {n_enriched} 篇全文", file=sys.stderr)
+
+    print("[10/11] Claude 摘要（繁體中文，200-300字）…", file=sys.stderr)
     matched = summarize_with_claude(matched, os.getenv("ANTHROPIC_API_KEY", ""))
     n_summarized = sum(1 for arts in matched.values() for a in arts if a.get("claude_summary"))
-    print(f"       完成 {n_summarized} 則摘要", file=sys.stderr)
+    print(f"        完成 {n_summarized} 則摘要", file=sys.stderr)
 
-    print("[10/10] 抓取股價…", file=sys.stderr)
+    print("[11/11] 抓取股價…", file=sys.stderr)
     prices = fetch_prices(list(matched.keys()))
     print(f"        取得 {len(prices)} 檔股價", file=sys.stderr)
 
