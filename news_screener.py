@@ -658,7 +658,15 @@ def summarize_with_claude(matched, api_key):
     title_to_summary = {}
 
     for batch_start in range(0, len(unique), 20):
-        batch = unique[batch_start: batch_start + 20]
+        # Only include articles with enough body text to actually summarize
+        batch_all = unique[batch_start: batch_start + 20]
+        batch = [
+            a for a in batch_all
+            if len((a.get("summary") or "").strip()) >= 100
+            and (a.get("summary") or "").strip() != a["title"].strip()
+        ]
+        if not batch:
+            continue
         items = "\n\n".join(
             f"{i + 1}. [lang={a['lang']}]\nTitle: {a['title']}\nContent: {a['summary'][:1000]}"
             for i, a in enumerate(batch)
@@ -898,6 +906,9 @@ def generate_pdf(matched, prices, hours, output_path):
 
             # News content — Claude summary (preferred) or raw content
             content = (article.get("claude_summary") or "").strip()
+            # Discard placeholder messages Claude generates when body is missing
+            if "無法評價" in content or "內容不完整" in content:
+                content = ""
             if not content:
                 content = (article.get("summary") or "").strip()
             # Skip if content just repeats the title
