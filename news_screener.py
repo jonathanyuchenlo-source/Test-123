@@ -348,86 +348,102 @@ def generate_pdf(matched, prices, hours, output_path):
     pdf.add_page()
 
     font = _load_font(pdf)
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    W = pdf.w - pdf.l_margin - pdf.r_margin   # usable width
+    LM = pdf.l_margin          # left margin (fixed reference)
+    W  = pdf.w - LM - pdf.r_margin   # usable page width
 
-    # ── Page title ───────────────────────────────────────────
+    def reset():
+        """Always reset cursor to left margin before writing a line."""
+        pdf.set_x(LM)
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # ── Page title ────────────────────────────────────────────
+    reset()
     pdf.set_font(font, size=18)
     pdf.set_text_color(20, 20, 20)
-    pdf.cell(W, 10, f"半導體硬體早報  {now_str}", ln=True, align="C")
+    pdf.cell(W, 10, f"半導體硬體早報  {now_str}", new_x="LMARGIN", new_y="NEXT", align="C")
+
+    reset()
     pdf.set_font(font, size=9)
     pdf.set_text_color(120, 120, 120)
-    pdf.cell(W, 6, f"涵蓋過去 {hours} 小時  |  追蹤名單 {len(WATCHLIST)} 檔  |  "
-             f"共 {len(matched)} 家公司有新聞", ln=True, align="C")
+    pdf.cell(W, 6,
+             f"涵蓋過去 {hours} 小時  |  追蹤名單 {len(WATCHLIST)} 檔  |  共 {len(matched)} 家公司有新聞",
+             new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.set_text_color(0, 0, 0)
-    pdf.ln(4)
+    pdf.ln(5)
 
     # ── One section per company ───────────────────────────────
     for company in sorted(matched.keys()):
         articles = matched[company]
         price    = prices.get(company)
 
-        # --- Company header bar ---
         chg = price["change_pct"] if price else None
         if chg is None:
-            r, g, b = 210, 210, 210     # grey  – no data
+            r, g, b = 210, 210, 210
         elif chg >= 0:
-            r, g, b = 198, 239, 206     # green – up
+            r, g, b = 198, 239, 206
         else:
-            r, g, b = 255, 199, 206     # red   – down
+            r, g, b = 255, 199, 206
 
+        # --- Company header: single full-width cell, price appended right ---
+        if price:
+            sign    = "▲" if chg >= 0 else "▼"
+            cur_sym = "NT$" if price["currency"] == "TWD" else "$"
+            price_str = f"  {price['ticker']}  {cur_sym}{price['price']:.2f}  {sign}{abs(chg):.2f}%"
+        else:
+            price_str = ""
+
+        reset()
         pdf.set_fill_color(r, g, b)
         pdf.set_font(font, size=12)
         pdf.set_text_color(20, 20, 20)
 
-        # Left side: company name
-        pdf.cell(W * 0.55, 9, f"  {company}", fill=True)
-
-        # Right side: ticker | price | % change
-        if price:
-            sign    = "▲" if chg >= 0 else "▼"
-            cur_sym = "NT$" if price["currency"] == "TWD" else "$"
-            price_text = (f"{price['ticker']}   {cur_sym}{price['price']:.2f}   "
-                          f"{sign} {abs(chg):.2f}%")
-        else:
-            price_text = "－"
-
-        pdf.cell(W * 0.45, 9, price_text, fill=True, ln=True, align="R")
+        W_name  = W * 0.58
+        W_price = W - W_name
+        pdf.cell(W_name,  9, f"  {company}",  fill=True, new_x="RIGHT",  new_y="TOP")
+        pdf.cell(W_price, 9, price_str,       fill=True, new_x="LMARGIN", new_y="NEXT", align="R")
 
         # --- News items ---
         for idx, article in enumerate(articles, 1):
-            # Thin separator between articles (not before first)
             if idx > 1:
-                pdf.set_draw_color(200, 200, 200)
-                pdf.line(pdf.l_margin + 4, pdf.get_y(), pdf.w - pdf.r_margin - 4, pdf.get_y())
+                reset()
+                pdf.set_draw_color(210, 210, 210)
+                pdf.line(LM + 3, pdf.get_y(), LM + W - 3, pdf.get_y())
+                pdf.ln(1)
 
-            # News title
+            # Title
+            reset()
             pdf.set_font(font, size=10)
             pdf.set_text_color(20, 20, 20)
-            title_text = f"  {idx}. {article['title']}"
-            pdf.multi_cell(W, 6, title_text)
+            pdf.multi_cell(W, 6, f"  {idx}. {article['title']}",
+                           new_x="LMARGIN", new_y="NEXT")
 
-            # AI implication (blue)
+            # AI implication
             if article.get("implication"):
+                reset()
                 pdf.set_font(font, size=9)
                 pdf.set_text_color(30, 80, 180)
-                pdf.multi_cell(W, 5, f"     → {article['implication']}")
+                pdf.multi_cell(W, 5, f"    \u2192 {article['implication']}",
+                               new_x="LMARGIN", new_y="NEXT")
 
-            # News content / summary (dark grey)
+            # Summary / content
             if article.get("summary"):
+                reset()
                 pdf.set_font(font, size=8)
                 pdf.set_text_color(80, 80, 80)
                 snippet = article["summary"].replace("\n", " ").strip()
                 if len(snippet) > 350:
                     snippet = snippet[:350] + "…"
-                pdf.multi_cell(W, 5, f"     {snippet}")
+                pdf.multi_cell(W, 5, f"    {snippet}",
+                               new_x="LMARGIN", new_y="NEXT")
 
-            # Source + timestamp (light grey, right-aligned)
+            # Source · time
+            reset()
             pdf.set_font(font, size=7)
-            pdf.set_text_color(150, 150, 150)
-            pdf.cell(W, 4, f"     {article['source']}  ·  {article['published']}  ·  {article['link'][:60]}",
-                     ln=True)
-            pdf.ln(1)
+            pdf.set_text_color(160, 160, 160)
+            src_line = f"    {article['source']}  ·  {article['published']}"
+            pdf.cell(W, 4, src_line, new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(2)
 
         pdf.ln(4)
 
