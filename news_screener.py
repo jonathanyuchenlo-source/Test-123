@@ -11,102 +11,48 @@ load_dotenv()
 # WATCHLIST  (display name → search keywords)
 # ─────────────────────────────────────────────
 WATCHLIST = {
+    # ── US-listed semiconductors ─────────────────────────────
     "TSMC":              ["TSMC", "Taiwan Semiconductor", "台積電", "TSM"],
     "UMC":               ["UMC", "United Microelectronics", "聯電"],
-    "MediaTek":          ["MediaTek", "聯發科", "MTK"],
-    "ASPEED Tech":       ["ASPEED", "信驊"],
     "ASE Technology":    ["ASE Technology", "ASE Group", "日月光", "ASX"],
-    "Chroma ATE":        ["Chroma", "致茂"],
-    "Unimicron":         ["Unimicron", "欣興"],
-    "Nan Ya PCB":        ["Nan Ya PCB", "Nan Ya Printed", "南亞電路板"],
-    "Kinsus":            ["Kinsus", "景碩"],
-    "Gold Circuit":      ["Gold Circuit", "GCE"],
-    "Elite Material":    ["Elite Material", "EMC"],
-    "Tripod Tech":       ["Tripod Technology", "健鼎科技"],
-    "Taiwan Union":      ["Taiwan Union", "台燿"],
-    "Hon Hai (Foxconn)": ["Hon Hai", "Foxconn", "鴻海", "富士康"],
-    "Quanta Computer":   ["Quanta Computer", "廣達"],
-    "Inventec":          ["Inventec", "英業達"],
-    "Wistron":           ["Wistron", "緯創"],
-    "Wiwynn":            ["Wiwynn", "緯穎"],
-    "Pegatron":          ["Pegatron", "和碩"],
-    "Compal":            ["Compal", "仁寶"],
+    "NVIDIA":            ["NVIDIA", "NVDA", "Nvidia", "輝達"],
+    "Intel":             ["Intel", "INTC", "英特爾"],
+    "Broadcom":          ["Broadcom", "AVGO", "博通"],
+    "AMD":               ["AMD", "Advanced Micro Devices", "超微"],
+    "Marvell":           ["Marvell Technology", "Marvell", "MRVL"],
+    "Qualcomm":          ["Qualcomm", "QCOM", "高通"],
+    "Astera Labs":       ["Astera Labs", "ALAB"],
+    "Credo Technology":  ["Credo Technology", "CRDO"],
+    "Micron":            ["Micron Technology", "Micron", "MU", "美光"],
+    # ── US-listed optical / photonics ────────────────────────
+    "Lumentum":          ["Lumentum"],     # "LITE" removed — too generic, causes false matches
+    "Coherent":          ["Coherent Corp", "COHR"],
+    "Fabrinet":          ["Fabrinet", "FN"],
+    # ── US-listed EMS / ODM ──────────────────────────────────
     "Celestica":         ["Celestica", "CLS"],
     "Flex Ltd":          ["Flex Ltd", "Flextronics"],
     "Jabil":             ["Jabil"],
-    "ASUSTeK":           ["ASUS", "ASUSTeK", "華碩"],
-    "Acer":              ["Acer", "宏碁"],
-    "Delta Electronics": ["Delta Electronics", "台達電"],
-    "Lite-On":           ["Lite-On", "光寶"],
-    "Hon Precision":     ["Hon Precision", "鴻準"],
-    "Lotes":             ["Lotes", "正崴"],
-    "BizLink":           ["BizLink", "彼洋"],
-    "Jentech":           ["Jentech", "健策"],
-    "Accton":            ["Accton", "智邦"],
-    "Auras Technology":  ["Auras", "雙鴻"],
-    "Asia Vital":        ["Asia Vital", "AVC", "建準"],
-    "NVIDIA":            ["NVIDIA", "NVDA", "Nvidia"],
-    "Intel":             ["Intel", "INTC"],
-    "Broadcom":          ["Broadcom", "AVGO"],
-    "AMD":               ["AMD", "Advanced Micro Devices"],
-    "Marvell":           ["Marvell Technology", "Marvell", "MRVL"],
-    "Qualcomm":          ["Qualcomm", "QCOM"],
-    "Astera Labs":       ["Astera Labs", "ALAB"],
-    "Credo Technology":  ["Credo Technology", "CRDO"],
-    "Micron":            ["Micron Technology", "Micron", "MU"],
-    "Lumentum":          ["Lumentum", "LITE"],
-    "Coherent":          ["Coherent Corp", "COHR"],
-    "Fabrinet":          ["Fabrinet", "FN"],
-    "Apple":             ["Apple", "AAPL"],
-    "Microsoft":         ["Microsoft", "MSFT"],
-    "Amazon (AWS)":      ["Amazon", "AWS", "AMZN"],
-    "Alphabet (Google)": ["Alphabet", "Google", "GOOGL"],
+    # ── US mega-cap tech ─────────────────────────────────────
+    "Apple":             ["Apple", "AAPL", "蘋果"],
+    "Microsoft":         ["Microsoft", "MSFT", "微軟"],
+    "Amazon (AWS)":      ["Amazon", "AWS", "AMZN", "亞馬遜"],
+    "Alphabet (Google)": ["Alphabet", "Google", "GOOGL", "谷歌"],
     "Meta":              ["Meta Platforms", "Meta", "Facebook", "META"],
-    "Super Micro":       ["Super Micro", "Supermicro", "SMCI"],
-    "Dell Technologies": ["Dell Technologies", "Dell", "DELL"],
+    # ── US-listed servers / hardware ─────────────────────────
+    "Super Micro":       ["Super Micro", "Supermicro", "SMCI", "美超微"],
+    "Dell Technologies": ["Dell Technologies", "Dell", "DELL", "戴爾"],
     "HPE":               ["Hewlett Packard Enterprise", "HPE"],
     "HP Inc":            ["HP Inc", "HPQ"],
 }
 
 # ─────────────────────────────────────────────
 # TICKER MAP  (company name → Yahoo Finance ticker)
-# TW stocks use .TW suffix; US-listed use ticker directly
+# US-listed stocks only
 # ─────────────────────────────────────────────
 TICKER_MAP = {
     "TSMC":              "TSM",
     "UMC":               "UMC",
-    "MediaTek":          "2454.TW",
-    "ASPEED Tech":       "5274.TW",
     "ASE Technology":    "ASX",
-    "Chroma ATE":        "2360.TW",
-    "Unimicron":         "3037.TW",
-    "Nan Ya PCB":        "8046.TW",
-    "Kinsus":            "3189.TW",
-    "Gold Circuit":      "2368.TW",
-    "Elite Material":    "2383.TW",
-    "Tripod Tech":       "3044.TW",
-    "Taiwan Union":      "6274.TW",
-    "Hon Hai (Foxconn)": "2317.TW",
-    "Quanta Computer":   "2382.TW",
-    "Inventec":          "2356.TW",
-    "Wistron":           "3231.TW",
-    "Wiwynn":            "6669.TW",
-    "Pegatron":          "4938.TW",
-    "Compal":            "2324.TW",
-    "Celestica":         "CLS",
-    "Flex Ltd":          "FLEX",
-    "Jabil":             "JBL",
-    "ASUSTeK":           "2357.TW",
-    "Acer":              "2353.TW",
-    "Delta Electronics": "2308.TW",
-    "Lite-On":           "2301.TW",
-    "Hon Precision":     "2354.TW",
-    "Lotes":             "3533.TW",
-    "BizLink":           "3665.TW",
-    "Jentech":           "3653.TW",
-    "Accton":            "2345.TW",
-    "Auras Technology":  "3324.TW",
-    "Asia Vital":        "3017.TW",
     "NVIDIA":            "NVDA",
     "Intel":             "INTC",
     "Broadcom":          "AVGO",
@@ -119,6 +65,9 @@ TICKER_MAP = {
     "Lumentum":          "LITE",
     "Coherent":          "COHR",
     "Fabrinet":          "FN",
+    "Celestica":         "CLS",
+    "Flex Ltd":          "FLEX",
+    "Jabil":             "JBL",
     "Apple":             "AAPL",
     "Microsoft":         "MSFT",
     "Amazon (AWS)":      "AMZN",
@@ -151,7 +100,8 @@ RSS_FEEDS = [
 # ─────────────────────────────────────────────
 def strip_html(text):
     """Robustly remove HTML tags using Python's built-in HTML parser,
-    then decode all HTML entities. Handles multi-line attributes, CDATA, etc."""
+    then decode all HTML entities. Handles multi-line attributes, CDATA, etc.
+    Also normalises all Unicode whitespace (\\xa0, \\u3000, tabs, etc.)."""
     import html as _html
     from html.parser import HTMLParser
 
@@ -172,7 +122,9 @@ def strip_html(text):
         result = ' '.join(s.parts)
     except Exception:
         result = re.sub(r'<[^>]+>', ' ', text, flags=re.DOTALL)
-    return ' '.join(result.split())
+    # Normalise ALL Unicode whitespace: \xa0 (nbsp), \u3000 (CJK space), tabs, etc.
+    result = re.sub(r'[\s\xa0\u3000\u200b\u200c\u200d\ufeff]+', ' ', result)
+    return result.strip()
 
 
 def parse_pub_date(entry):
@@ -510,8 +462,15 @@ def _is_junk(article):
 
 
 def match_stocks(articles):
-    results = {}
+    # First, deduplicate articles by title (same article from multiple sources)
+    deduped, seen_titles = [], set()
     for article in articles:
+        if article["title"] not in seen_titles:
+            seen_titles.add(article["title"])
+            deduped.append(article)
+
+    results = {}
+    for article in deduped:
         if _is_junk(article):
             continue
         text = (article["title"] + " " + article["summary"]).lower()
@@ -519,8 +478,7 @@ def match_stocks(articles):
             for kw in keywords:
                 if kw.lower() in text:
                     results.setdefault(company, [])
-                    if article not in results[company]:
-                        results[company].append(article)
+                    results[company].append(article)
                     break
     return results
 
