@@ -151,12 +151,29 @@ RSS_FEEDS = [
 # NEWS FETCHING
 # ─────────────────────────────────────────────
 def strip_html(text):
-    """Remove HTML tags and decode common HTML entities."""
-    text = re.sub(r'<[^>]+>', '', text or '')
-    for entity, char in [('&nbsp;', ' '), ('&amp;', '&'), ('&lt;', '<'),
-                          ('&gt;', '>'), ('&quot;', '"'), ('&#39;', "'")]:
-        text = text.replace(entity, char)
-    return ' '.join(text.split())
+    """Robustly remove HTML tags using Python's built-in HTML parser,
+    then decode all HTML entities. Handles multi-line attributes, CDATA, etc."""
+    import html as _html
+    from html.parser import HTMLParser
+
+    class _Stripper(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.parts = []
+        def handle_data(self, d):
+            self.parts.append(d)
+        def handle_entityref(self, name):
+            pass   # already handled by unescape below
+
+    text = _html.unescape(text or '')   # decode &amp; &lt; &#39; etc. first
+    try:
+        s = _Stripper()
+        s.feed(text)
+        s.close()
+        result = ' '.join(s.parts)
+    except Exception:
+        result = re.sub(r'<[^>]+>', ' ', text, flags=re.DOTALL)
+    return ' '.join(result.split())
 
 
 def parse_pub_date(entry):
@@ -476,10 +493,16 @@ def filter_with_claude(matched, api_key):
         )
         prompt = (
             "You are a news relevance filter for a semiconductor and hardware equity analyst.\n\n"
-            "Each item is formatted as [Company] Article Title.\n"
-            "Answer YES if the article is genuinely about or significantly related to that company "
-            "(its products, earnings, orders, supply chain, management, customers, or partners).\n"
-            "Answer NO if the company is only mentioned incidentally, or the article is clearly unrelated.\n\n"
+            "Each item is formatted as [Company] Article Title.\n\n"
+            "Answer YES only if the article is PRIMARILY about that specific company "
+            "(its own earnings, products, orders, management decisions, guidance, or direct business news).\n\n"
+            "Answer NO if:\n"
+            "- The company is only mentioned as a customer, supplier, or partner of another company\n"
+            "- The article is mainly about a DIFFERENT company that happens to mention this one\n"
+            "- The company name appears only incidentally (e.g. in a list, or as context)\n"
+            "- The article is unrelated (e.g. 'AMD' matching an unrelated acronym)\n\n"
+            "Example: Article '[NVIDIA] TSMC beats earnings on AI chip demand' → NO "
+            "(article is about TSMC, NVIDIA is only mentioned as a customer)\n\n"
             f"Items:\n{items}\n\n"
             'Reply ONLY in JSON: {"1": "YES", "2": "NO", ...}'
         )
@@ -514,6 +537,81 @@ def filter_with_claude(matched, api_key):
             filtered[company] = kept
 
     return filtered
+
+
+# ─────────────────────────────────────────────
+# AI SUMMARIZATION
+# ─────────────────────────────────────────────
+def summarize_with_claude(matched, api_key):
+    """Use Claude Haiku to write clean 3-5 sentence investor summaries for every article.
+    Works for all sources: full-text (鉅亨網) and short-snippet (Reuters, NewsAPI, etc.).
+    Result stored in article['claude_summary'] and shown in the PDF instead of raw content."""
+    if not api_key:
+        return matched
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+    except ImportError:
+        print("  [summary warn] anthropic not installed, skipping summarization", file=sys.stderr)
+        return matched
+
+    # Collect unique articles across all companies (avoid re-summarizing duplicates)
+    seen_titles, unique = set(), []
+    for articles in matched.values():
+        for a in articles:
+            if a["title"] not in seen_titles:
+                seen_titles.add(a["title"])
+                unique.append(a)
+
+    if not unique:
+        return matched
+
+    title_to_summary = {}
+
+    for batch_start in range(0, len(unique), 20):
+        batch = unique[batch_start: batch_start + 20]
+        items = "\n\n".join(
+            f"{i + 1}. [lang={a['lang']}]\nTitle: {a['title']}\nContent: {a['summary'][:1000]}"
+            for i, a in enumerate(batch)
+        )
+        prompt = (
+            "You are a semiconductor and hardware equity research analyst.\n\n"
+            "For each article below, write a clean 3-5 sentence investor-focused summary.\n\n"
+            "Rules:\n"
+            "- [lang=zh] → write in Traditional Chinese\n"
+            "- [lang=en] → write in English\n"
+            "- Focus on: what specifically happened, which product/segment is affected, "
+            "financial impact (revenue, margins, shipments, orders), and key numbers if available\n"
+            "- Do NOT start with 'This article' or repeat the title\n"
+            "- Be factual and precise; omit marketing language\n\n"
+            f"Articles:\n{items}\n\n"
+            'Reply ONLY in JSON: {"1": "summary text", "2": "summary text", ...}'
+        )
+        try:
+            response = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=3000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response.content[0].text.strip()
+            if "```" in raw:
+                raw = raw.split("```")[1].lstrip("json").strip()
+            parsed = json.loads(raw)
+            for i, article in enumerate(batch):
+                s = parsed.get(str(i + 1), "").strip()
+                if s:
+                    title_to_summary[article["title"]] = s
+        except Exception as e:
+            print(f"  [summary warn] batch {batch_start}: {e}", file=sys.stderr)
+        time.sleep(0.3)
+
+    # Write summaries back into articles
+    for articles in matched.values():
+        for a in articles:
+            if a["title"] in title_to_summary:
+                a["claude_summary"] = title_to_summary[a["title"]]
+
+    return matched
 
 
 # ─────────────────────────────────────────────
@@ -708,7 +806,9 @@ def generate_pdf(matched, prices, hours, output_path):
                 reset()
                 pdf.set_font(font, size=8)
                 pdf.set_text_color(80, 80, 80)
-                snippet = article["summary"].replace("\n", " ").strip()
+                # Prefer Claude-generated summary; fall back to raw content
+                raw_text = article.get("claude_summary") or article.get("summary", "")
+                snippet  = raw_text.replace("\n", " ").strip()
                 if len(snippet) > 1500:
                     snippet = snippet[:1500] + "…"
                 pdf.multi_cell(W, 5, f"    {snippet}",
@@ -739,35 +839,40 @@ def main():
     parser.add_argument("--no-pdf", action="store_true", help="Output Markdown instead of PDF")
     args = parser.parse_args()
 
-    print(f"[1/8] 抓取 RSS：WSJ / 經濟日報（過去 {args.hours} 小時）…", file=sys.stderr)
+    print(f"[1/9] 抓取 RSS：WSJ / 經濟日報（過去 {args.hours} 小時）…", file=sys.stderr)
     rss = fetch_rss(args.hours)
     print(f"      {len(rss)} 則", file=sys.stderr)
 
-    print("[2/8] 抓取 Reuters（via Google News RSS）…", file=sys.stderr)
+    print("[2/9] 抓取 Reuters（via Google News RSS）…", file=sys.stderr)
     reuters = fetch_google_news_reuters(args.hours)
     print(f"      {len(reuters)} 則", file=sys.stderr)
 
-    print("[3/8] 抓取鉅亨網（台股 / 頭條 / 科技 / 美股）完整內文…", file=sys.stderr)
+    print("[3/9] 抓取鉅亨網（台股 / 頭條 / 科技 / 美股）完整內文…", file=sys.stderr)
     cnyes = fetch_cnyes_api(args.hours)
     print(f"      {len(cnyes)} 則", file=sys.stderr)
 
-    print("[4/8] Bloomberg + NewsAPI broad query…", file=sys.stderr)
+    print("[4/9] Bloomberg + NewsAPI broad query…", file=sys.stderr)
     newsapi = fetch_newsapi(args.hours, os.getenv("NEWSAPI_KEY", ""))
     print(f"      {len(newsapi)} 則", file=sys.stderr)
 
-    print("[5/8] 抓取 Futubull…", file=sys.stderr)
+    print("[5/9] 抓取 Futubull…", file=sys.stderr)
     futu = fetch_futubull(args.hours)
     print(f"      {len(futu)} 則", file=sys.stderr)
 
-    print("[6/8] 比對追蹤名單…", file=sys.stderr)
+    print("[6/9] 比對追蹤名單…", file=sys.stderr)
     matched = match_stocks(rss + reuters + cnyes + newsapi + futu)
     print(f"      共 {len(matched)} 家公司命中（篩選前）", file=sys.stderr)
 
-    print("[7/8] Claude AI 篩選不相關新聞…", file=sys.stderr)
+    print("[7/9] Claude AI 篩選不相關新聞…", file=sys.stderr)
     matched = filter_with_claude(matched, os.getenv("ANTHROPIC_API_KEY", ""))
     print(f"      篩選後 {len(matched)} 家公司，{sum(len(v) for v in matched.values())} 則", file=sys.stderr)
 
-    print("[8/8] 抓取股價…", file=sys.stderr)
+    print("[8/9] Claude 摘要新聞內容…", file=sys.stderr)
+    matched = summarize_with_claude(matched, os.getenv("ANTHROPIC_API_KEY", ""))
+    n_summarized = sum(1 for arts in matched.values() for a in arts if a.get("claude_summary"))
+    print(f"      完成 {n_summarized} 則摘要", file=sys.stderr)
+
+    print("[9/9] 抓取股價…", file=sys.stderr)
     prices = fetch_prices(list(matched.keys()))
     print(f"      取得 {len(prices)} 檔股價", file=sys.stderr)
 
