@@ -262,38 +262,41 @@ def fetch_google_news_reuters(hours):
 
 
 def fetch_google_news_tw(hours):
-    """Fetch 工商時報 and 經濟日報 articles via Google News RSS.
-    Both sites have unreliable/no native RSS; Google News indexes them fully.
-    Uses site: operator so results are strictly from those domains."""
+    """Fetch 工商時報 and 經濟日報 via Google News RSS.
+    Queries are built dynamically from the full WATCHLIST so every tracked
+    company is covered — not just a hardcoded subset."""
     from urllib.parse import quote_plus
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     days   = max(2, (hours // 24) + 1)
 
-    # (site, display source name, keyword groups)
-    sources = [
-        (
-            "ctee.com.tw", "工商時報",
-            [
-                "台積電 OR TSMC OR 聯發科 OR MediaTek OR 英特爾 OR 輝達",
-                "鴻海 OR 廣達 OR 緯創 OR 緯穎 OR 聯電 OR 日月光",
-                "半導體 OR AI晶片 OR CoWoS OR HBM OR 供應鏈 OR 伺服器",
-                "NVIDIA OR Intel OR AMD OR Broadcom OR Micron OR Qualcomm",
-            ],
-        ),
-        (
-            "money.udn.com", "經濟日報",
-            [
-                "台積電 OR TSMC OR 聯發科 OR MediaTek OR 英特爾 OR 輝達",
-                "鴻海 OR 廣達 OR 緯創 OR 緯穎 OR 聯電 OR 日月光",
-                "半導體 OR AI晶片 OR CoWoS OR HBM OR 供應鏈 OR 伺服器",
-                "NVIDIA OR Intel OR AMD OR Broadcom OR Micron OR Qualcomm",
-            ],
-        ),
+    # Build keyword list from WATCHLIST (first 2 keywords per company,
+    # which are always the most specific identifiers).
+    seen_kws, all_kws = set(), []
+    for kws in WATCHLIST.values():
+        for kw in kws[:2]:
+            if kw not in seen_kws:
+                seen_kws.add(kw)
+                all_kws.append(kw)
+
+    # Group into batches of 8 to form manageable OR queries.
+    # Multi-word keywords get quoted; single tokens are used as-is.
+    def _fmt(kw):
+        return f'"{kw}"' if " " in kw else kw
+
+    batch_size = 8
+    query_groups = [
+        " OR ".join(_fmt(kw) for kw in all_kws[i: i + batch_size])
+        for i in range(0, len(all_kws), batch_size)
     ]
 
-    articles, seen = [], set()
+    sources = [
+        ("ctee.com.tw",   "工商時報"),
+        ("money.udn.com", "經濟日報"),
+    ]
 
-    for site, src_name, query_groups in sources:
+    articles, seen_titles = [], set()
+
+    for site, src_name in sources:
         for q in query_groups:
             encoded = quote_plus(f"when:{days}d site:{site} {q}")
             url = f"https://news.google.com/rss/search?q={encoded}&ceid=TW:zh-Hant&hl=zh-TW&gl=TW"
@@ -301,14 +304,12 @@ def fetch_google_news_tw(hours):
                 feed = feedparser.parse(url, request_headers={"User-Agent": "NewsScreener/1.0"})
                 for entry in feed.entries:
                     title = entry.get("title", "").strip()
-                    # Google News appends " - 工商時報" or " - 經濟日報" to titles
-                    for suffix in (f" - {src_name}", " - 工商時報", " - 經濟日報",
-                                   " - 工商時報 - 工商時報", " - 經濟日報網"):
+                    for suffix in (f" - {src_name}", " - 工商時報", " - 經濟日報", " - 經濟日報網"):
                         if title.endswith(suffix):
                             title = title[: -len(suffix)]
-                    if not title or title in seen:
+                    if not title or title in seen_titles:
                         continue
-                    seen.add(title)
+                    seen_titles.add(title)
                     pub = parse_pub_date(entry)
                     if pub and pub < cutoff:
                         continue
