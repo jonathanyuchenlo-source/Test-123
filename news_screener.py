@@ -135,9 +135,7 @@ TICKER_MAP = {
 # ─────────────────────────────────────────────
 RSS_FEEDS = [
     # ── English ──────────────────────────────────────────────
-    ("https://feeds.reuters.com/reuters/technologyNews",  "en"),   # Reuters Tech
-    ("https://feeds.reuters.com/reuters/businessNews",    "en"),   # Reuters Business
-    ("https://feeds.reuters.com/reuters/companyNews",     "en"),   # Reuters Company
+    # NOTE: Reuters discontinued native RSS feeds; use fetch_google_news_reuters() instead
     ("https://www.wsj.com/xml/rss/3_7085.xml",           "en"),   # WSJ Tech
     ("https://www.wsj.com/xml/rss/3_7014.xml",           "en"),   # WSJ Markets
     # ── Traditional Chinese ───────────────────────────────────
@@ -189,6 +187,52 @@ def fetch_rss(hours):
                     })
         except Exception as e:
             print(f"  [RSS warn] {url}: {e}", file=sys.stderr)
+    return articles
+
+
+def fetch_google_news_reuters(hours):
+    """Fetch Reuters articles via Google News RSS.
+    Reuters discontinued their native RSS feeds (feeds.reuters.com) around 2019-2020.
+    Google News indexes Reuters and supports site: filtering via RSS."""
+    from urllib.parse import quote_plus
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    days   = max(2, (hours // 24) + 1)   # slightly wider window; code filters precisely
+
+    # Multiple keyword groups to maximise coverage across the watchlist
+    query_groups = [
+        "TSMC OR NVIDIA OR Intel OR Broadcom OR AMD OR Micron OR Qualcomm",
+        "Marvell OR MediaTek OR Foxconn OR Wiwynn OR Celestica OR Jabil",
+        'semiconductor OR "AI chip" OR HBM OR CoWoS OR "supply chain"',
+        '"Super Micro" OR Astera OR Credo OR Fabrinet OR Lumentum OR Coherent',
+    ]
+
+    articles, seen = [], set()
+    for q in query_groups:
+        encoded = quote_plus(f"when:{days}d site:reuters.com {q}")
+        url = f"https://news.google.com/rss/search?q={encoded}&ceid=US:en&hl=en-US&gl=US"
+        try:
+            feed = feedparser.parse(url, request_headers={"User-Agent": "NewsScreener/1.0"})
+            for entry in feed.entries:
+                title = entry.get("title", "").strip()
+                # Google News appends " - Reuters" to titles
+                if title.endswith(" - Reuters"):
+                    title = title[: -len(" - Reuters")]
+                if not title or title in seen:
+                    continue
+                seen.add(title)
+                pub = parse_pub_date(entry)
+                if pub and pub < cutoff:
+                    continue
+                articles.append({
+                    "title":     title,
+                    "summary":   entry.get("summary", "")[:400],
+                    "link":      entry.get("link", ""),
+                    "source":    "Reuters",
+                    "published": pub.strftime("%Y-%m-%d %H:%M UTC") if pub else "unknown",
+                    "lang":      "en",
+                })
+        except Exception as e:
+            print(f"  [Reuters warn] {e}", file=sys.stderr)
     return articles
 
 
@@ -527,23 +571,27 @@ def main():
     parser.add_argument("--no-pdf", action="store_true", help="Output Markdown instead of PDF")
     args = parser.parse_args()
 
-    print(f"[1/6] 抓取 RSS：Reuters / WSJ / 經濟日報 / 鉅亨網（過去 {args.hours} 小時）…", file=sys.stderr)
+    print(f"[1/6] 抓取 RSS：WSJ / 經濟日報 / 鉅亨網（過去 {args.hours} 小時）…", file=sys.stderr)
     rss = fetch_rss(args.hours)
     print(f"      {len(rss)} 則", file=sys.stderr)
 
-    print("[2/6] Bloomberg + NewsAPI broad query…", file=sys.stderr)
+    print("[2/6] 抓取 Reuters（via Google News RSS）…", file=sys.stderr)
+    reuters = fetch_google_news_reuters(args.hours)
+    print(f"      {len(reuters)} 則", file=sys.stderr)
+
+    print("[3/6] Bloomberg + NewsAPI broad query…", file=sys.stderr)
     newsapi = fetch_newsapi(args.hours, os.getenv("NEWSAPI_KEY", ""))
     print(f"      {len(newsapi)} 則", file=sys.stderr)
 
-    print("[3/6] 抓取 Futubull…", file=sys.stderr)
+    print("[4/6] 抓取 Futubull…", file=sys.stderr)
     futu = fetch_futubull(args.hours)
     print(f"      {len(futu)} 則", file=sys.stderr)
 
-    print("[4/6] 比對追蹤名單…", file=sys.stderr)
-    matched = match_stocks(rss + newsapi + futu)
+    print("[5/6] 比對追蹤名單…", file=sys.stderr)
+    matched = match_stocks(rss + reuters + newsapi + futu)
     print(f"      共 {len(matched)} 家公司命中", file=sys.stderr)
 
-    print("[5/6] 抓取股價…", file=sys.stderr)
+    print("[6/6] 抓取股價…", file=sys.stderr)
     prices = fetch_prices(list(matched.keys()))
     print(f"      取得 {len(prices)} 檔股價", file=sys.stderr)
 
