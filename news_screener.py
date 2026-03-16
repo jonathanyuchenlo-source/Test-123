@@ -141,10 +141,10 @@ RSS_FEEDS = [
     # ── Traditional Chinese ───────────────────────────────────
     ("https://money.udn.com/rssfeed/news/1001/5588",     "zh"),   # 經濟日報 科技
     ("https://money.udn.com/rssfeed/news/1001/5612",     "zh"),   # 經濟日報 產業
-    ("https://www.cnyes.com/rss/cat/tw_stock_news",      "zh"),   # 鉅亨網 台股
 ]
 # Bloomberg is fetched separately via NewsAPI (see fetch_bloomberg)
 # Futubull is fetched separately via scraper (see fetch_futubull)
+# 鉅亨網 is fetched separately via API (see fetch_cnyes_api) for full article content
 
 
 # ─────────────────────────────────────────────
@@ -285,6 +285,89 @@ def fetch_newsapi(hours, api_key):
         except Exception as e:
             print(f"  [NewsAPI warn] {e}", file=sys.stderr)
     return results
+
+
+def fetch_cnyes_api(hours):
+    """Fetch full-content news from 鉅亨網 (cnyes.com) via their public JSON API.
+    Covers three categories: 台股, 頭條, 科技.
+    Returns complete article body text (not just short summaries)."""
+    import time as _time
+
+    end_at   = int(_time.time())
+    start_at = end_at - hours * 3600
+    cutoff   = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    categories = [
+        ("tw_stock", "鉅亨網 台股"),
+        ("headline", "鉅亨網 頭條"),
+        ("tech",     "鉅亨網 科技"),
+        ("us_stock", "鉅亨網 美股"),
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept":     "application/json",
+        "Referer":    "https://news.cnyes.com/",
+    }
+
+    articles, seen = [], set()
+
+    for cat_id, cat_name in categories:
+        page = 1
+        while True:
+            url = (
+                f"https://api.cnyes.com/media/api/v1/newslist/category/{cat_id}"
+                f"?page={page}&limit=30&startAt={start_at}&endAt={end_at}"
+            )
+            try:
+                resp = requests.get(url, headers=headers, timeout=15)
+                if resp.status_code != 200:
+                    break
+                data      = resp.json()
+                item_wrap = data.get("items", {})
+                items     = item_wrap.get("data", [])
+                if not items:
+                    break
+
+                for item in items:
+                    news_id = item.get("newsId") or item.get("id")
+                    title   = (item.get("title") or "").strip()
+                    if not title or title in seen:
+                        continue
+                    seen.add(title)
+
+                    # Full article body — strip HTML tags
+                    body = strip_html(item.get("content") or item.get("summary") or "")
+
+                    pub_ts = item.get("publishAt") or 0
+                    try:
+                        pub     = datetime.fromtimestamp(int(pub_ts), tz=timezone.utc)
+                        if pub < cutoff:
+                            continue
+                        pub_str = pub.strftime("%Y-%m-%d %H:%M UTC")
+                    except Exception:
+                        pub_str = "unknown"
+
+                    link = f"https://news.cnyes.com/news/id/{news_id}" if news_id else ""
+
+                    articles.append({
+                        "title":     title,
+                        "summary":   body[:2000],   # full content, up to 2000 chars
+                        "link":      link,
+                        "source":    cat_name,
+                        "published": pub_str,
+                        "lang":      "zh",
+                    })
+
+                last_page = item_wrap.get("last_page", 1)
+                if page >= last_page:
+                    break
+                page += 1
+
+            except Exception as e:
+                print(f"  [cnyes warn] {cat_id} p{page}: {e}", file=sys.stderr)
+                break
+
+    return articles
 
 
 def fetch_futubull(hours):
@@ -626,8 +709,8 @@ def generate_pdf(matched, prices, hours, output_path):
                 pdf.set_font(font, size=8)
                 pdf.set_text_color(80, 80, 80)
                 snippet = article["summary"].replace("\n", " ").strip()
-                if len(snippet) > 350:
-                    snippet = snippet[:350] + "…"
+                if len(snippet) > 1500:
+                    snippet = snippet[:1500] + "…"
                 pdf.multi_cell(W, 5, f"    {snippet}",
                                new_x="LMARGIN", new_y="NEXT")
 
@@ -656,31 +739,35 @@ def main():
     parser.add_argument("--no-pdf", action="store_true", help="Output Markdown instead of PDF")
     args = parser.parse_args()
 
-    print(f"[1/7] 抓取 RSS：WSJ / 經濟日報 / 鉅亨網（過去 {args.hours} 小時）…", file=sys.stderr)
+    print(f"[1/8] 抓取 RSS：WSJ / 經濟日報（過去 {args.hours} 小時）…", file=sys.stderr)
     rss = fetch_rss(args.hours)
     print(f"      {len(rss)} 則", file=sys.stderr)
 
-    print("[2/7] 抓取 Reuters（via Google News RSS）…", file=sys.stderr)
+    print("[2/8] 抓取 Reuters（via Google News RSS）…", file=sys.stderr)
     reuters = fetch_google_news_reuters(args.hours)
     print(f"      {len(reuters)} 則", file=sys.stderr)
 
-    print("[3/7] Bloomberg + NewsAPI broad query…", file=sys.stderr)
+    print("[3/8] 抓取鉅亨網（台股 / 頭條 / 科技 / 美股）完整內文…", file=sys.stderr)
+    cnyes = fetch_cnyes_api(args.hours)
+    print(f"      {len(cnyes)} 則", file=sys.stderr)
+
+    print("[4/8] Bloomberg + NewsAPI broad query…", file=sys.stderr)
     newsapi = fetch_newsapi(args.hours, os.getenv("NEWSAPI_KEY", ""))
     print(f"      {len(newsapi)} 則", file=sys.stderr)
 
-    print("[4/7] 抓取 Futubull…", file=sys.stderr)
+    print("[5/8] 抓取 Futubull…", file=sys.stderr)
     futu = fetch_futubull(args.hours)
     print(f"      {len(futu)} 則", file=sys.stderr)
 
-    print("[5/7] 比對追蹤名單…", file=sys.stderr)
-    matched = match_stocks(rss + reuters + newsapi + futu)
+    print("[6/8] 比對追蹤名單…", file=sys.stderr)
+    matched = match_stocks(rss + reuters + cnyes + newsapi + futu)
     print(f"      共 {len(matched)} 家公司命中（篩選前）", file=sys.stderr)
 
-    print("[6/7] Claude AI 篩選不相關新聞…", file=sys.stderr)
+    print("[7/8] Claude AI 篩選不相關新聞…", file=sys.stderr)
     matched = filter_with_claude(matched, os.getenv("ANTHROPIC_API_KEY", ""))
     print(f"      篩選後 {len(matched)} 家公司，{sum(len(v) for v in matched.values())} 則", file=sys.stderr)
 
-    print("[7/7] 抓取股價…", file=sys.stderr)
+    print("[8/8] 抓取股價…", file=sys.stderr)
     prices = fetch_prices(list(matched.keys()))
     print(f"      取得 {len(prices)} 檔股價", file=sys.stderr)
 
