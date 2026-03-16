@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, os, sys, time, json
+import argparse, os, sys, time, json, re
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import feedparser, requests
@@ -150,6 +150,15 @@ RSS_FEEDS = [
 # ─────────────────────────────────────────────
 # NEWS FETCHING
 # ─────────────────────────────────────────────
+def strip_html(text):
+    """Remove HTML tags and decode common HTML entities."""
+    text = re.sub(r'<[^>]+>', '', text or '')
+    for entity, char in [('&nbsp;', ' '), ('&amp;', '&'), ('&lt;', '<'),
+                          ('&gt;', '>'), ('&quot;', '"'), ('&#39;', "'")]:
+        text = text.replace(entity, char)
+    return ' '.join(text.split())
+
+
 def parse_pub_date(entry):
     for field in ("published", "updated"):
         raw = entry.get(f"{field}_parsed") or entry.get(field)
@@ -179,7 +188,7 @@ def fetch_rss(hours):
                 if title:
                     articles.append({
                         "title":     title,
-                        "summary":   entry.get("summary", "")[:400],
+                        "summary":   strip_html(entry.get("summary", ""))[:400],
                         "link":      entry.get("link", ""),
                         "source":    feed.feed.get("title", url),
                         "published": pub.strftime("%Y-%m-%d %H:%M UTC") if pub else "unknown",
@@ -225,7 +234,7 @@ def fetch_google_news_reuters(hours):
                     continue
                 articles.append({
                     "title":     title,
-                    "summary":   entry.get("summary", "")[:400],
+                    "summary":   strip_html(entry.get("summary", ""))[:400],
                     "link":      entry.get("link", ""),
                     "source":    "Reuters",
                     "published": pub.strftime("%Y-%m-%d %H:%M UTC") if pub else "unknown",
@@ -346,6 +355,82 @@ def match_stocks(articles):
                         results[company].append(article)
                     break
     return results
+
+
+# ─────────────────────────────────────────────
+# AI RELEVANCE FILTER
+# ─────────────────────────────────────────────
+def filter_with_claude(matched, api_key):
+    """Use Claude Haiku to remove articles that aren't genuinely about each company.
+    Keyword matching is broad; this step removes false positives (e.g. 'AMD' appearing
+    in an unrelated article)."""
+    if not api_key:
+        return matched
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+    except ImportError:
+        print("  [filter warn] anthropic not installed, skipping AI filter", file=sys.stderr)
+        return matched
+
+    # Flatten all (company, article) pairs into a single indexed list
+    pairs = []
+    for company, articles in matched.items():
+        for article in articles:
+            pairs.append((company, article))
+
+    if not pairs:
+        return matched
+
+    decisions = {}   # 1-based index -> "YES"/"NO"
+
+    # Batch in groups of 40 to stay within token limits
+    for batch_start in range(0, len(pairs), 40):
+        batch = pairs[batch_start: batch_start + 40]
+        items = "\n".join(
+            f"{i + 1}. [{company}] {article['title']}"
+            for i, (company, article) in enumerate(batch)
+        )
+        prompt = (
+            "You are a news relevance filter for a semiconductor and hardware equity analyst.\n\n"
+            "Each item is formatted as [Company] Article Title.\n"
+            "Answer YES if the article is genuinely about or significantly related to that company "
+            "(its products, earnings, orders, supply chain, management, customers, or partners).\n"
+            "Answer NO if the company is only mentioned incidentally, or the article is clearly unrelated.\n\n"
+            f"Items:\n{items}\n\n"
+            'Reply ONLY in JSON: {"1": "YES", "2": "NO", ...}'
+        )
+        try:
+            response = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=600,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response.content[0].text.strip()
+            if "```" in raw:
+                raw = raw.split("```")[1].lstrip("json").strip()
+            parsed = json.loads(raw)
+            for i in range(len(batch)):
+                decisions[batch_start + i + 1] = parsed.get(str(i + 1), "YES").upper()
+        except Exception as e:
+            print(f"  [filter warn] batch {batch_start}: {e}", file=sys.stderr)
+            for i in range(len(batch)):
+                decisions[batch_start + i + 1] = "YES"   # keep on error
+        time.sleep(0.2)
+
+    # Rebuild matched dict keeping only YES articles
+    filtered = {}
+    idx = 1
+    for company, articles in matched.items():
+        kept = []
+        for a in articles:
+            if decisions.get(idx, "YES") == "YES":
+                kept.append(a)
+            idx += 1
+        if kept:
+            filtered[company] = kept
+
+    return filtered
 
 
 # ─────────────────────────────────────────────
@@ -571,27 +656,31 @@ def main():
     parser.add_argument("--no-pdf", action="store_true", help="Output Markdown instead of PDF")
     args = parser.parse_args()
 
-    print(f"[1/6] 抓取 RSS：WSJ / 經濟日報 / 鉅亨網（過去 {args.hours} 小時）…", file=sys.stderr)
+    print(f"[1/7] 抓取 RSS：WSJ / 經濟日報 / 鉅亨網（過去 {args.hours} 小時）…", file=sys.stderr)
     rss = fetch_rss(args.hours)
     print(f"      {len(rss)} 則", file=sys.stderr)
 
-    print("[2/6] 抓取 Reuters（via Google News RSS）…", file=sys.stderr)
+    print("[2/7] 抓取 Reuters（via Google News RSS）…", file=sys.stderr)
     reuters = fetch_google_news_reuters(args.hours)
     print(f"      {len(reuters)} 則", file=sys.stderr)
 
-    print("[3/6] Bloomberg + NewsAPI broad query…", file=sys.stderr)
+    print("[3/7] Bloomberg + NewsAPI broad query…", file=sys.stderr)
     newsapi = fetch_newsapi(args.hours, os.getenv("NEWSAPI_KEY", ""))
     print(f"      {len(newsapi)} 則", file=sys.stderr)
 
-    print("[4/6] 抓取 Futubull…", file=sys.stderr)
+    print("[4/7] 抓取 Futubull…", file=sys.stderr)
     futu = fetch_futubull(args.hours)
     print(f"      {len(futu)} 則", file=sys.stderr)
 
-    print("[5/6] 比對追蹤名單…", file=sys.stderr)
+    print("[5/7] 比對追蹤名單…", file=sys.stderr)
     matched = match_stocks(rss + reuters + newsapi + futu)
-    print(f"      共 {len(matched)} 家公司命中", file=sys.stderr)
+    print(f"      共 {len(matched)} 家公司命中（篩選前）", file=sys.stderr)
 
-    print("[6/6] 抓取股價…", file=sys.stderr)
+    print("[6/7] Claude AI 篩選不相關新聞…", file=sys.stderr)
+    matched = filter_with_claude(matched, os.getenv("ANTHROPIC_API_KEY", ""))
+    print(f"      篩選後 {len(matched)} 家公司，{sum(len(v) for v in matched.values())} 則", file=sys.stderr)
+
+    print("[7/7] 抓取股價…", file=sys.stderr)
     prices = fetch_prices(list(matched.keys()))
     print(f"      取得 {len(prices)} 檔股價", file=sys.stderr)
 
