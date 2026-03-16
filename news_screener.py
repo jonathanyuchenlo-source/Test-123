@@ -139,8 +139,7 @@ RSS_FEEDS = [
     ("https://www.wsj.com/xml/rss/3_7085.xml",           "en"),   # WSJ Tech
     ("https://www.wsj.com/xml/rss/3_7014.xml",           "en"),   # WSJ Markets
     # ── Traditional Chinese ───────────────────────────────────
-    ("https://money.udn.com/rssfeed/news/1001/5588",     "zh"),   # 經濟日報 科技
-    ("https://money.udn.com/rssfeed/news/1001/5612",     "zh"),   # 經濟日報 產業
+    # 經濟日報 & 工商時報 fetched via fetch_google_news_tw() for fuller content
 ]
 # Bloomberg is fetched separately via NewsAPI (see fetch_bloomberg)
 # Futubull is fetched separately via scraper (see fetch_futubull)
@@ -259,6 +258,71 @@ def fetch_google_news_reuters(hours):
                 })
         except Exception as e:
             print(f"  [Reuters warn] {e}", file=sys.stderr)
+    return articles
+
+
+def fetch_google_news_tw(hours):
+    """Fetch 工商時報 and 經濟日報 articles via Google News RSS.
+    Both sites have unreliable/no native RSS; Google News indexes them fully.
+    Uses site: operator so results are strictly from those domains."""
+    from urllib.parse import quote_plus
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    days   = max(2, (hours // 24) + 1)
+
+    # (site, display source name, keyword groups)
+    sources = [
+        (
+            "ctee.com.tw", "工商時報",
+            [
+                "台積電 OR TSMC OR 聯發科 OR MediaTek OR 英特爾 OR 輝達",
+                "鴻海 OR 廣達 OR 緯創 OR 緯穎 OR 聯電 OR 日月光",
+                "半導體 OR AI晶片 OR CoWoS OR HBM OR 供應鏈 OR 伺服器",
+                "NVIDIA OR Intel OR AMD OR Broadcom OR Micron OR Qualcomm",
+            ],
+        ),
+        (
+            "money.udn.com", "經濟日報",
+            [
+                "台積電 OR TSMC OR 聯發科 OR MediaTek OR 英特爾 OR 輝達",
+                "鴻海 OR 廣達 OR 緯創 OR 緯穎 OR 聯電 OR 日月光",
+                "半導體 OR AI晶片 OR CoWoS OR HBM OR 供應鏈 OR 伺服器",
+                "NVIDIA OR Intel OR AMD OR Broadcom OR Micron OR Qualcomm",
+            ],
+        ),
+    ]
+
+    articles, seen = [], set()
+
+    for site, src_name, query_groups in sources:
+        for q in query_groups:
+            encoded = quote_plus(f"when:{days}d site:{site} {q}")
+            url = f"https://news.google.com/rss/search?q={encoded}&ceid=TW:zh-Hant&hl=zh-TW&gl=TW"
+            try:
+                feed = feedparser.parse(url, request_headers={"User-Agent": "NewsScreener/1.0"})
+                for entry in feed.entries:
+                    title = entry.get("title", "").strip()
+                    # Google News appends " - 工商時報" or " - 經濟日報" to titles
+                    for suffix in (f" - {src_name}", " - 工商時報", " - 經濟日報",
+                                   " - 工商時報 - 工商時報", " - 經濟日報網"):
+                        if title.endswith(suffix):
+                            title = title[: -len(suffix)]
+                    if not title or title in seen:
+                        continue
+                    seen.add(title)
+                    pub = parse_pub_date(entry)
+                    if pub and pub < cutoff:
+                        continue
+                    articles.append({
+                        "title":     title,
+                        "summary":   strip_html(entry.get("summary", ""))[:400],
+                        "link":      entry.get("link", ""),
+                        "source":    src_name,
+                        "published": pub.strftime("%Y-%m-%d %H:%M UTC") if pub else "unknown",
+                        "lang":      "zh",
+                    })
+            except Exception as e:
+                print(f"  [{src_name} warn] {e}", file=sys.stderr)
+
     return articles
 
 
@@ -443,9 +507,23 @@ def fetch_futubull(hours):
     return articles
 
 
+# Titles containing these strings are junk (speed blurbs, surveys, price-only tickers)
+_JUNK_PATTERNS = [
+    "鉅亨速報", "速報", "factset", "最新調查", "彭博調查",
+    "stock price & latest news", "股價 & 最新消息",
+    "premarket", "after hours", "price target",   # bare price-change blurbs
+]
+
+def _is_junk(article):
+    title_lower = article["title"].lower()
+    return any(p.lower() in title_lower for p in _JUNK_PATTERNS)
+
+
 def match_stocks(articles):
     results = {}
     for article in articles:
+        if _is_junk(article):
+            continue
         text = (article["title"] + " " + article["summary"]).lower()
         for company, keywords in WATCHLIST.items():
             for kw in keywords:
@@ -575,17 +653,17 @@ def summarize_with_claude(matched, api_key):
             for i, a in enumerate(batch)
         )
         prompt = (
-            "You are a semiconductor and hardware equity research analyst.\n\n"
-            "For each article below, write a clean 3-5 sentence investor-focused summary.\n\n"
-            "Rules:\n"
-            "- [lang=zh] → write in Traditional Chinese\n"
-            "- [lang=en] → write in English\n"
-            "- Focus on: what specifically happened, which product/segment is affected, "
-            "financial impact (revenue, margins, shipments, orders), and key numbers if available\n"
-            "- Do NOT start with 'This article' or repeat the title\n"
-            "- Be factual and precise; omit marketing language\n\n"
-            f"Articles:\n{items}\n\n"
-            'Reply ONLY in JSON: {"1": "summary text", "2": "summary text", ...}'
+            "你是一位台灣半導體與硬體產業的股票研究分析師。\n\n"
+            "請為以下每篇文章，用**繁體中文**撰寫一段 200-300 字的投資人摘要。\n\n"
+            "規則：\n"
+            "- 無論原文是中文或英文，摘要一律用繁體中文撰寫\n"
+            "- 長度：200-300 字（不可低於 200 字）\n"
+            "- 重點涵蓋：發生了什麼事、影響哪個產品或業務線、財務影響（營收、毛利、出貨量、訂單）、重要數字\n"
+            "- 如有具體數字（百分比、金額、季度）請保留\n"
+            "- 不要以公司名稱或『這篇文章』開頭，也不要重複標題\n"
+            "- 語氣客觀、專業，避免行銷用語\n\n"
+            f"文章列表：\n{items}\n\n"
+            'Reply ONLY in JSON: {"1": "摘要文字", "2": "摘要文字", ...}'
         )
         try:
             response = client.messages.create(
@@ -755,8 +833,14 @@ def generate_pdf(matched, prices, hours, output_path):
     pdf.set_text_color(0, 0, 0)
     pdf.ln(5)
 
+    # ── Sort: US stocks first, TW stocks (.TW ticker) last ────
+    def _company_sort_key(name):
+        ticker = TICKER_MAP.get(name, "")
+        is_tw  = ticker.endswith(".TW")
+        return (1 if is_tw else 0, name)
+
     # ── One section per company ───────────────────────────────
-    for company in sorted(matched.keys()):
+    for company in sorted(matched.keys(), key=_company_sort_key):
         articles = matched[company]
         price    = prices.get(company)
 
@@ -839,42 +923,46 @@ def main():
     parser.add_argument("--no-pdf", action="store_true", help="Output Markdown instead of PDF")
     args = parser.parse_args()
 
-    print(f"[1/9] 抓取 RSS：WSJ / 經濟日報（過去 {args.hours} 小時）…", file=sys.stderr)
+    print(f"[1/10] 抓取 RSS：WSJ（過去 {args.hours} 小時）…", file=sys.stderr)
     rss = fetch_rss(args.hours)
-    print(f"      {len(rss)} 則", file=sys.stderr)
+    print(f"       {len(rss)} 則", file=sys.stderr)
 
-    print("[2/9] 抓取 Reuters（via Google News RSS）…", file=sys.stderr)
+    print("[2/10] 抓取 Reuters（via Google News RSS）…", file=sys.stderr)
     reuters = fetch_google_news_reuters(args.hours)
-    print(f"      {len(reuters)} 則", file=sys.stderr)
+    print(f"       {len(reuters)} 則", file=sys.stderr)
 
-    print("[3/9] 抓取鉅亨網（台股 / 頭條 / 科技 / 美股）完整內文…", file=sys.stderr)
+    print("[3/10] 抓取工商時報 / 經濟日報（via Google News RSS）…", file=sys.stderr)
+    tw_news = fetch_google_news_tw(args.hours)
+    print(f"       {len(tw_news)} 則", file=sys.stderr)
+
+    print("[4/10] 抓取鉅亨網（台股 / 頭條 / 科技 / 美股）完整內文…", file=sys.stderr)
     cnyes = fetch_cnyes_api(args.hours)
-    print(f"      {len(cnyes)} 則", file=sys.stderr)
+    print(f"       {len(cnyes)} 則", file=sys.stderr)
 
-    print("[4/9] Bloomberg + NewsAPI broad query…", file=sys.stderr)
+    print("[5/10] Bloomberg + NewsAPI broad query…", file=sys.stderr)
     newsapi = fetch_newsapi(args.hours, os.getenv("NEWSAPI_KEY", ""))
-    print(f"      {len(newsapi)} 則", file=sys.stderr)
+    print(f"       {len(newsapi)} 則", file=sys.stderr)
 
-    print("[5/9] 抓取 Futubull…", file=sys.stderr)
+    print("[6/10] 抓取 Futubull…", file=sys.stderr)
     futu = fetch_futubull(args.hours)
-    print(f"      {len(futu)} 則", file=sys.stderr)
+    print(f"       {len(futu)} 則", file=sys.stderr)
 
-    print("[6/9] 比對追蹤名單…", file=sys.stderr)
-    matched = match_stocks(rss + reuters + cnyes + newsapi + futu)
-    print(f"      共 {len(matched)} 家公司命中（篩選前）", file=sys.stderr)
+    print("[7/10] 比對追蹤名單（過濾垃圾速報）…", file=sys.stderr)
+    matched = match_stocks(rss + reuters + tw_news + cnyes + newsapi + futu)
+    print(f"       共 {len(matched)} 家公司命中（篩選前）", file=sys.stderr)
 
-    print("[7/9] Claude AI 篩選不相關新聞…", file=sys.stderr)
+    print("[8/10] Claude AI 篩選不相關新聞…", file=sys.stderr)
     matched = filter_with_claude(matched, os.getenv("ANTHROPIC_API_KEY", ""))
-    print(f"      篩選後 {len(matched)} 家公司，{sum(len(v) for v in matched.values())} 則", file=sys.stderr)
+    print(f"       篩選後 {len(matched)} 家公司，{sum(len(v) for v in matched.values())} 則", file=sys.stderr)
 
-    print("[8/9] Claude 摘要新聞內容…", file=sys.stderr)
+    print("[9/10] Claude 摘要（繁體中文，200-300字）…", file=sys.stderr)
     matched = summarize_with_claude(matched, os.getenv("ANTHROPIC_API_KEY", ""))
     n_summarized = sum(1 for arts in matched.values() for a in arts if a.get("claude_summary"))
-    print(f"      完成 {n_summarized} 則摘要", file=sys.stderr)
+    print(f"       完成 {n_summarized} 則摘要", file=sys.stderr)
 
-    print("[9/9] 抓取股價…", file=sys.stderr)
+    print("[10/10] 抓取股價…", file=sys.stderr)
     prices = fetch_prices(list(matched.keys()))
-    print(f"      取得 {len(prices)} 檔股價", file=sys.stderr)
+    print(f"        取得 {len(prices)} 檔股價", file=sys.stderr)
 
     # Determine output path
     if args.out:
