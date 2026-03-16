@@ -135,18 +135,19 @@ TICKER_MAP = {
 # RSS FEEDS  (url, language)
 # ─────────────────────────────────────────────
 RSS_FEEDS = [
-    ("https://feeds.reuters.com/reuters/technologyNews",  "en"),
-    ("https://feeds.reuters.com/reuters/businessNews",    "en"),
-    ("https://feeds.reuters.com/reuters/companyNews",     "en"),
-    ("https://www.wsj.com/xml/rss/3_7085.xml",           "en"),
-    ("https://www.wsj.com/xml/rss/3_7014.xml",           "en"),
-    ("https://feeds.finance.yahoo.com/rss/2.0/headline?s=NVDA,TSM,INTC,AVGO,AMD,MU,MRVL,QCOM", "en"),
-    ("https://www.chinatimes.com/rss/industry.xml",      "zh"),
-    ("https://www.chinatimes.com/rss/tech.xml",          "zh"),
-    ("https://www.cnyes.com/rss/cat/tw_stock_news",      "zh"),
-    ("https://money.udn.com/rssfeed/news/1001/5588",     "zh"),
-    ("https://money.udn.com/rssfeed/news/1001/5612",     "zh"),
+    # ── English ──────────────────────────────────────────────
+    ("https://feeds.reuters.com/reuters/technologyNews",  "en"),   # Reuters Tech
+    ("https://feeds.reuters.com/reuters/businessNews",    "en"),   # Reuters Business
+    ("https://feeds.reuters.com/reuters/companyNews",     "en"),   # Reuters Company
+    ("https://www.wsj.com/xml/rss/3_7085.xml",           "en"),   # WSJ Tech
+    ("https://www.wsj.com/xml/rss/3_7014.xml",           "en"),   # WSJ Markets
+    # ── Traditional Chinese ───────────────────────────────────
+    ("https://money.udn.com/rssfeed/news/1001/5588",     "zh"),   # 經濟日報 科技
+    ("https://money.udn.com/rssfeed/news/1001/5612",     "zh"),   # 經濟日報 產業
+    ("https://www.cnyes.com/rss/cat/tw_stock_news",      "zh"),   # 鉅亨網 台股
 ]
+# Bloomberg is fetched separately via NewsAPI (see fetch_bloomberg)
+# Futubull is fetched separately via scraper (see fetch_futubull)
 
 
 # ─────────────────────────────────────────────
@@ -192,29 +193,87 @@ def fetch_rss(hours):
     return articles
 
 
-def fetch_newsapi(hours, api_key):
+def fetch_bloomberg(hours, api_key):
+    """Fetch Bloomberg headlines via NewsAPI (bloomberg source only)."""
     if not api_key:
         return []
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    query = ("TSMC OR NVIDIA OR Intel OR Broadcom OR AMD OR Micron OR Qualcomm OR Marvell "
-             "OR Foxconn OR MediaTek OR semiconductor OR AI chip OR HBM OR CoWoS")
     try:
         resp = requests.get("https://newsapi.org/v2/everything", timeout=15, params={
-            "q": query, "from": cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "sortBy": "publishedAt", "language": "en", "pageSize": 100, "apiKey": api_key,
+            "sources":   "bloomberg",
+            "from":      cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "sortBy":    "publishedAt",
+            "pageSize":  100,
+            "apiKey":    api_key,
         })
         resp.raise_for_status()
         return [{
             "title":     a.get("title", "").strip(),
             "summary":   (a.get("description") or "")[:400],
             "link":      a.get("url", ""),
-            "source":    a.get("source", {}).get("name", "NewsAPI"),
+            "source":    "Bloomberg",
             "published": a.get("publishedAt", "unknown"),
             "lang":      "en",
         } for a in resp.json().get("articles", [])]
     except Exception as e:
-        print(f"  [NewsAPI warn] {e}", file=sys.stderr)
+        print(f"  [Bloomberg/NewsAPI warn] {e}", file=sys.stderr)
         return []
+
+
+def fetch_futubull(hours):
+    """Scrape Futubull public news page (no login required)."""
+    import re
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    articles = []
+
+    # Futubull serves news via an internal JSON API called by their frontend
+    # Try the public news list endpoint (no auth required for public market news)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://news.futunn.com/",
+    }
+    urls_to_try = [
+        # Futubull internal news API endpoints (public, no auth)
+        "https://news.futunn.com/news-site/api/news-list?type=1&size=50&lang=zh-TW",
+        "https://news.futunn.com/news-site/api/news-list?type=1&size=50&lang=en",
+    ]
+    for url in urls_to_try:
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            items = data.get("data", {}).get("list") or data.get("list") or []
+            lang  = "zh" if "zh-TW" in url else "en"
+            for item in items:
+                title   = (item.get("title") or item.get("newsTitle") or "").strip()
+                summary = (item.get("summary") or item.get("content") or "")[:400]
+                link    = item.get("url") or item.get("link") or ""
+                pub_ts  = item.get("publishTime") or item.get("time") or 0
+                if pub_ts:
+                    try:
+                        pub = datetime.fromtimestamp(int(str(pub_ts)[:10]), tz=timezone.utc)
+                        if pub < cutoff:
+                            continue
+                        pub_str = pub.strftime("%Y-%m-%d %H:%M UTC")
+                    except Exception:
+                        pub_str = "unknown"
+                else:
+                    pub_str = "unknown"
+                if title:
+                    articles.append({
+                        "title":     title,
+                        "summary":   summary,
+                        "link":      link,
+                        "source":    "Futubull",
+                        "published": pub_str,
+                        "lang":      lang,
+                    })
+        except Exception as e:
+            print(f"  [Futubull warn] {url}: {e}", file=sys.stderr)
+
+    return articles
 
 
 def match_stocks(articles):
@@ -464,25 +523,29 @@ def main():
 
     use_ai = not args.no_ai and bool(os.getenv("ANTHROPIC_API_KEY", ""))
 
-    print(f"[1/5] 抓取 RSS（過去 {args.hours} 小時）…", file=sys.stderr)
+    print(f"[1/6] 抓取 RSS：Reuters / WSJ / 經濟日報 / 鉅亨網（過去 {args.hours} 小時）…", file=sys.stderr)
     rss = fetch_rss(args.hours)
-    print(f"      RSS 取得 {len(rss)} 則", file=sys.stderr)
+    print(f"      {len(rss)} 則", file=sys.stderr)
 
-    print("[2/5] 抓取 NewsAPI…", file=sys.stderr)
-    api = fetch_newsapi(args.hours, os.getenv("NEWSAPI_KEY", ""))
-    print(f"      NewsAPI 取得 {len(api)} 則", file=sys.stderr)
+    print("[2/6] 抓取 Bloomberg（via NewsAPI）…", file=sys.stderr)
+    bloomberg = fetch_bloomberg(args.hours, os.getenv("NEWSAPI_KEY", ""))
+    print(f"      {len(bloomberg)} 則", file=sys.stderr)
 
-    print("[3/5] 比對追蹤名單…", file=sys.stderr)
-    matched = match_stocks(rss + api)
+    print("[3/6] 抓取 Futubull…", file=sys.stderr)
+    futu = fetch_futubull(args.hours)
+    print(f"      {len(futu)} 則", file=sys.stderr)
+
+    print("[4/6] 比對追蹤名單…", file=sys.stderr)
+    matched = match_stocks(rss + bloomberg + futu)
     print(f"      共 {len(matched)} 家公司命中", file=sys.stderr)
 
     if use_ai and matched:
-        print("[4/5] Claude 評注中…", file=sys.stderr)
+        print("[5/6] Claude 評注中…", file=sys.stderr)
         matched = score_with_claude(matched, Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY")))
     else:
-        print("[4/5] 略過 AI 評注", file=sys.stderr)
+        print("[5/6] 略過 AI 評注", file=sys.stderr)
 
-    print("[5/5] 抓取股價…", file=sys.stderr)
+    print("[6/6] 抓取股價…", file=sys.stderr)
     prices = fetch_prices(list(matched.keys()))
     print(f"      取得 {len(prices)} 檔股價", file=sys.stderr)
 
