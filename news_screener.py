@@ -215,31 +215,41 @@ def fetch_rss(hours):
     return articles
 
 
-def fetch_google_news_reuters(hours):
-    """Fetch Reuters articles via Google News RSS.
-    Reuters discontinued their native RSS feeds (feeds.reuters.com) around 2019-2020.
-    Google News indexes Reuters and supports site: filtering via RSS."""
-    from urllib.parse import quote_plus
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    days   = max(2, (hours // 24) + 1)   # slightly wider window; code filters precisely
+def _build_watchlist_query_groups(batch_size=8):
+    """Build OR query groups from the full WATCHLIST (first 2 keywords per company).
+    Shared by Reuters and TW newspaper fetchers so all 60 companies are covered."""
+    def _fmt(kw):
+        return f'"{kw}"' if " " in kw else kw
 
-    # Multiple keyword groups to maximise coverage across the watchlist
-    query_groups = [
-        "TSMC OR NVIDIA OR Intel OR Broadcom OR AMD OR Micron OR Qualcomm",
-        "Marvell OR MediaTek OR Foxconn OR Wiwynn OR Celestica OR Jabil",
-        'semiconductor OR "AI chip" OR HBM OR CoWoS OR "supply chain"',
-        '"Super Micro" OR Astera OR Credo OR Fabrinet OR Lumentum OR Coherent',
+    seen_kws, all_kws = set(), []
+    for kws in WATCHLIST.values():
+        for kw in kws[:2]:
+            if kw not in seen_kws:
+                seen_kws.add(kw)
+                all_kws.append(kw)
+
+    return [
+        " OR ".join(_fmt(kw) for kw in all_kws[i: i + batch_size])
+        for i in range(0, len(all_kws), batch_size)
     ]
 
+
+def fetch_google_news_reuters(hours):
+    """Fetch Reuters articles via Google News RSS.
+    Reuters discontinued their native RSS feeds around 2019-2020.
+    Queries built dynamically from WATCHLIST — all 60 companies covered."""
+    from urllib.parse import quote_plus
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    days   = max(2, (hours // 24) + 1)
+
     articles, seen = [], set()
-    for q in query_groups:
+    for q in _build_watchlist_query_groups():
         encoded = quote_plus(f"when:{days}d site:reuters.com {q}")
         url = f"https://news.google.com/rss/search?q={encoded}&ceid=US:en&hl=en-US&gl=US"
         try:
             feed = feedparser.parse(url, request_headers={"User-Agent": "NewsScreener/1.0"})
             for entry in feed.entries:
                 title = entry.get("title", "").strip()
-                # Google News appends " - Reuters" to titles
                 if title.endswith(" - Reuters"):
                     title = title[: -len(" - Reuters")]
                 if not title or title in seen:
@@ -263,31 +273,10 @@ def fetch_google_news_reuters(hours):
 
 def fetch_google_news_tw(hours):
     """Fetch 工商時報 and 經濟日報 via Google News RSS.
-    Queries are built dynamically from the full WATCHLIST so every tracked
-    company is covered — not just a hardcoded subset."""
+    Queries built dynamically from WATCHLIST via _build_watchlist_query_groups()."""
     from urllib.parse import quote_plus
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     days   = max(2, (hours // 24) + 1)
-
-    # Build keyword list from WATCHLIST (first 2 keywords per company,
-    # which are always the most specific identifiers).
-    seen_kws, all_kws = set(), []
-    for kws in WATCHLIST.values():
-        for kw in kws[:2]:
-            if kw not in seen_kws:
-                seen_kws.add(kw)
-                all_kws.append(kw)
-
-    # Group into batches of 8 to form manageable OR queries.
-    # Multi-word keywords get quoted; single tokens are used as-is.
-    def _fmt(kw):
-        return f'"{kw}"' if " " in kw else kw
-
-    batch_size = 8
-    query_groups = [
-        " OR ".join(_fmt(kw) for kw in all_kws[i: i + batch_size])
-        for i in range(0, len(all_kws), batch_size)
-    ]
 
     sources = [
         ("ctee.com.tw",   "工商時報"),
@@ -297,7 +286,7 @@ def fetch_google_news_tw(hours):
     articles, seen_titles = [], set()
 
     for site, src_name in sources:
-        for q in query_groups:
+        for q in _build_watchlist_query_groups():
             encoded = quote_plus(f"when:{days}d site:{site} {q}")
             url = f"https://news.google.com/rss/search?q={encoded}&ceid=TW:zh-Hant&hl=zh-TW&gl=TW"
             try:
