@@ -7,6 +7,7 @@ transcribe.py
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -95,7 +96,13 @@ def transcribe(audio_path: Path) -> str:
     # 檔案太大，用 ffmpeg 切塊
     logger.info(f"[Whisper] 檔案超過 24MB，用 ffmpeg 切割成 {CHUNK_MINUTES} 分鐘一塊...")
     with tempfile.TemporaryDirectory() as tmp_dir:
-        chunks = _split_with_ffmpeg(audio_path, tmp_dir)
+        # 若路徑含非 ASCII 字元（中文檔名），先複製到 temp 目錄避免 Windows encoding 問題
+        safe_path = audio_path
+        if not all(ord(c) < 128 for c in str(audio_path)):
+            safe_path = Path(tmp_dir) / ("input" + audio_path.suffix)
+            shutil.copy2(audio_path, safe_path)
+            logger.info(f"[Whisper] 偵測到非 ASCII 路徑，已複製到暫存: {safe_path.name}")
+        chunks = _split_with_ffmpeg(safe_path, tmp_dir)
         total = len(chunks)
         parts: list[str] = []
         for i, chunk in enumerate(chunks):
