@@ -14,9 +14,9 @@ OPENAI_API_KEY    = os.environ["OPENAI_API_KEY"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 
 # ── Microsoft / OneNote ───────────────────────────────────────────────────────
-MS_CLIENT_ID     = os.environ["MS_CLIENT_ID"]       # Azure app client_id
-MS_CLIENT_SECRET = os.environ["MS_CLIENT_SECRET"]   # Azure app client_secret
-MS_TENANT_ID     = os.environ["MS_TENANT_ID"]       # Azure tenant_id (or "common")
+MS_CLIENT_ID     = os.getenv("MS_CLIENT_ID", "")       # Azure app client_id
+MS_CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET", "")   # Azure app client_secret
+MS_TENANT_ID     = os.getenv("MS_TENANT_ID", "common") # Azure tenant_id (or "common")
 
 # OneNote 目的地
 ONENOTE_NOTEBOOK = os.getenv("ONENOTE_NOTEBOOK", "Investment Memos")  # Notebook 名稱
