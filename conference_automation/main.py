@@ -15,6 +15,7 @@ import sys
 import time
 from pathlib import Path
 
+from docx import Document
 from watchdog.events import FileCreatedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
@@ -69,11 +70,14 @@ def process_audio(audio_path: Path) -> None:
     memo = generate_memo(transcript, audio_filename=audio_path.stem)
     logger.info(f"✅ Step 2/3 Memo 生成完成（{len(memo)} 字元）")
 
-    # Step 3: 存到本地 Memos 資料夾
+    # Step 3: 存到本地 Memos 資料夾（Word 文件）
     output_dir = Path(config.OUTPUT_FOLDER)
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / (audio_path.stem + ".md")
-    output_path.write_text(memo, encoding="utf-8")
+    output_path = output_dir / (audio_path.stem + ".docx")
+    doc = Document()
+    for line in memo.splitlines():
+        doc.add_paragraph(line)
+    doc.save(str(output_path))
     logger.info(f"✅ Step 3/3 Memo 已儲存 → {output_path}")
 
     _mark_processed(audio_path)
