@@ -37,5 +37,9 @@ CLAUDE_MAX_TOKENS = 8000
 WHISPER_MODEL    = "whisper-1"
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "zh")  # zh = 中文, en = 英文, auto = 自動偵測
 
+# ── Output ───────────────────────────────────────────────────────────────────
+# Memo 存放資料夾（之後接 OneNote 時這步會變成上傳）
+OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", str(Path.home() / "Documents" / "ConferenceMemos"))
+
 # ── Misc ──────────────────────────────────────────────────────────────────────
 PROCESSED_LOG = Path(os.getenv("PROCESSED_LOG", "./processed_files.txt"))

@@ -1,7 +1,7 @@
 """
 main.py
 會議錄音全自動化流水線：
-  音檔 → Whisper 轉錄 → Claude 生成 memo → OneNote
+  音檔 → Whisper 轉錄 → Claude 生成 memo → 本地資料夾（暫時跳過 OneNote）
 
 使用方式：
   python main.py              # 監聽模式（持續監控資料夾）
@@ -20,7 +20,6 @@ from watchdog.observers import Observer
 
 import config
 from memo import generate_memo
-from onenote import save_to_onenote
 from transcribe import transcribe
 
 # ── Logging Setup ─────────────────────────────────────────────────────────────
@@ -70,15 +69,12 @@ def process_audio(audio_path: Path) -> None:
     memo = generate_memo(transcript, audio_filename=audio_path.stem)
     logger.info(f"✅ Step 2/3 Memo 生成完成（{len(memo)} 字元）")
 
-    # 同時把 memo 存成本地備份
-    backup_path = audio_path.with_suffix(".md")
-    backup_path.write_text(memo, encoding="utf-8")
-    logger.info(f"💾 本地備份: {backup_path}")
-
-    # Step 3: 存入 OneNote
-    page_title = audio_path.stem
-    page_url = save_to_onenote(memo, page_title)
-    logger.info(f"✅ Step 3/3 已存入 OneNote → {page_url}")
+    # Step 3: 存到本地 Memos 資料夾
+    output_dir = Path(config.OUTPUT_FOLDER)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / (audio_path.stem + ".md")
+    output_path.write_text(memo, encoding="utf-8")
+    logger.info(f"✅ Step 3/3 Memo 已儲存 → {output_path}")
 
     _mark_processed(audio_path)
     logger.info(f"🎉 完成！{audio_path.name}\n")
