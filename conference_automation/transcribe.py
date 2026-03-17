@@ -1,24 +1,24 @@
 """
 transcribe.py
 用 OpenAI Whisper API 把音檔轉成逐字稿。
-自動偵測檔案大小，超過 24MB 則切割成小塊分批轉錄。
+自動偵測檔案大小，超過 24MB 則用 ffmpeg 切割成小塊分批轉錄。
 """
 
 from __future__ import annotations
 
 import logging
+import subprocess
 import tempfile
 from pathlib import Path
 
 import openai
-from pydub import AudioSegment
 
 import config
 
 logger = logging.getLogger(__name__)
 
-MAX_BYTES = 24 * 1024 * 1024   # 24MB（Whisper 上限 25MB，留 1MB 緩衝）
-CHUNK_MINUTES = 10              # 每塊切 10 分鐘
+MAX_BYTES    = 24 * 1024 * 1024  # 24MB（Whisper 上限 25MB，留 1MB 緩衝）
+CHUNK_MINUTES = 10               # 每塊切 10 分鐘
 
 _client: openai.OpenAI | None = None
 
@@ -28,6 +28,40 @@ def _get_client() -> openai.OpenAI:
     if _client is None:
         _client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
     return _client
+
+
+def _get_duration(audio_path: Path) -> float:
+    """用 ffprobe 取得音檔總秒數。"""
+    result = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(audio_path)],
+        capture_output=True, text=True, check=True
+    )
+    return float(result.stdout.strip())
+
+
+def _split_with_ffmpeg(audio_path: Path, tmp_dir: str) -> list[Path]:
+    """用 ffmpeg 把音檔切成 CHUNK_MINUTES 分鐘一塊，存成 mp3。"""
+    duration = _get_duration(audio_path)
+    chunk_sec = CHUNK_MINUTES * 60
+    chunks: list[Path] = []
+
+    start = 0.0
+    idx = 0
+    while start < duration:
+        out = Path(tmp_dir) / f"chunk_{idx:03d}.mp3"
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(audio_path),
+             "-ss", str(start), "-t", str(chunk_sec),
+             "-ar", "16000", "-ac", "1", "-b:a", "64k",
+             str(out)],
+            capture_output=True, check=True
+        )
+        chunks.append(out)
+        start += chunk_sec
+        idx += 1
+
+    return chunks
 
 
 def _transcribe_file(client: openai.OpenAI, path: Path) -> str:
@@ -46,13 +80,7 @@ def _transcribe_file(client: openai.OpenAI, path: Path) -> str:
 def transcribe(audio_path: Path) -> str:
     """
     把音檔送到 Whisper API，回傳逐字稿文字。
-    檔案超過 24MB 自動切塊分批處理。
-
-    Args:
-        audio_path: 音檔路徑（.m4a / .mp3 等）
-
-    Returns:
-        逐字稿字串
+    檔案超過 24MB 自動用 ffmpeg 切塊分批處理。
     """
     client = _get_client()
     file_size = audio_path.stat().st_size
@@ -64,23 +92,16 @@ def transcribe(audio_path: Path) -> str:
         logger.info(f"[Whisper] 轉錄完成，共 {len(result)} 字元")
         return result.strip()
 
-    # 檔案太大，切塊處理
-    logger.info(f"[Whisper] 檔案超過 24MB，自動切割成 {CHUNK_MINUTES} 分鐘一塊...")
-    audio = AudioSegment.from_file(audio_path)
-    chunk_ms = CHUNK_MINUTES * 60 * 1000
-    total_chunks = (len(audio) + chunk_ms - 1) // chunk_ms
-
-    parts: list[str] = []
+    # 檔案太大，用 ffmpeg 切塊
+    logger.info(f"[Whisper] 檔案超過 24MB，用 ffmpeg 切割成 {CHUNK_MINUTES} 分鐘一塊...")
     with tempfile.TemporaryDirectory() as tmp_dir:
-        for i, start_ms in enumerate(range(0, len(audio), chunk_ms)):
-            chunk = audio[start_ms: start_ms + chunk_ms]
-            chunk_path = Path(tmp_dir) / f"chunk_{i:03d}.mp3"
-            chunk.export(chunk_path, format="mp3", bitrate="64k")
+        chunks = _split_with_ffmpeg(audio_path, tmp_dir)
+        total = len(chunks)
+        parts: list[str] = []
+        for i, chunk in enumerate(chunks):
+            logger.info(f"[Whisper] 轉錄第 {i+1}/{total} 塊...")
+            parts.append(_transcribe_file(client, chunk).strip())
 
-            logger.info(f"[Whisper] 轉錄第 {i+1}/{total_chunks} 塊...")
-            text = _transcribe_file(client, chunk_path)
-            parts.append(text.strip())
-
-    full_transcript = " ".join(parts)
-    logger.info(f"[Whisper] 全部轉錄完成，共 {len(full_transcript)} 字元")
-    return full_transcript
+    full = " ".join(parts)
+    logger.info(f"[Whisper] 全部轉錄完成，共 {len(full)} 字元")
+    return full
