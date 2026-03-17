@@ -15,7 +15,10 @@ import sys
 import time
 from pathlib import Path
 
+import re
+
 from docx import Document
+from docx.shared import Pt
 from watchdog.events import FileCreatedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
@@ -30,6 +33,47 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+# ── Markdown → Docx ───────────────────────────────────────────────────────────
+
+def _add_runs(paragraph, text: str) -> None:
+    """處理行內 **bold** 標記，拆成多個 run 寫入段落。"""
+    parts = re.split(r"\*\*(.+?)\*\*", text)
+    for i, part in enumerate(parts):
+        if not part:
+            continue
+        run = paragraph.add_run(part)
+        run.bold = (i % 2 == 1)
+
+
+def _save_markdown_as_docx(doc: Document, markdown: str) -> None:
+    """將 markdown 字串解析後寫入 python-docx Document。"""
+    for line in markdown.splitlines():
+        # 標題
+        if line.startswith("### "):
+            doc.add_heading(line[4:].strip(), level=3)
+        elif line.startswith("## "):
+            doc.add_heading(line[3:].strip(), level=2)
+        elif line.startswith("# "):
+            doc.add_heading(line[2:].strip(), level=1)
+        # 列點（- 或 *）
+        elif re.match(r"^[-*]\s+", line):
+            content = re.sub(r"^[-*]\s+", "", line)
+            p = doc.add_paragraph(style="List Bullet")
+            _add_runs(p, content)
+        # 數字列點（1. 2. 3.）
+        elif re.match(r"^\d+\.\s+", line):
+            content = re.sub(r"^\d+\.\s+", "", line)
+            p = doc.add_paragraph(style="List Number")
+            _add_runs(p, content)
+        # 空行
+        elif line.strip() == "":
+            doc.add_paragraph("")
+        # 一般段落
+        else:
+            p = doc.add_paragraph()
+            _add_runs(p, line)
 
 
 # ── Processed Files Log ───────────────────────────────────────────────────────
@@ -75,8 +119,7 @@ def process_audio(audio_path: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / (audio_path.stem + ".docx")
     doc = Document()
-    for line in memo.splitlines():
-        doc.add_paragraph(line)
+    _save_markdown_as_docx(doc, memo)
     doc.save(str(output_path))
     logger.info(f"✅ Step 3/3 Memo 已儲存 → {output_path}")
 
